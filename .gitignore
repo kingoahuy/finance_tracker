@@ -1,42 +1,50 @@
-# Sensitive configuration
+﻿# Secrets
 .env
 .env.*
 !.env.example
-.streamlit/secrets.toml
+*.pem
+*.key
+secrets.*
+credentials.*
 
-# Local databases and personal finance data
-my_account_book.db
+# Database (contains real financial data)
 *.db
-*.db-journal
+*.db-*
 *.sqlite
 *.sqlite3
+*.sqlite-*
 
-# Python virtual environments and caches
+# Logs & runtime
+logs/
+*.pid
+*.lock
+
+# Private exports & backups
+exports/
+backups/
+*.csv
+*.xlsx
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.Python
+
+# Virtual environment
 .venv/
 venv/
-env/
-__pycache__/
-*.py[cod]
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
+ENV/
 
-# Logs and temporary files
-logs/
-*.log
-api_error_log.txt
-*.tmp
-*.temp
-*.bak
-
-# Local exports
-Bill_*.xlsx
-exports/
-output/
-
-# IDE and operating system files
-.vscode/
+# IDE
 .idea/
+.vscode/
+
+# OS
 .DS_Store
 Thumbs.db
-desktop.ini
