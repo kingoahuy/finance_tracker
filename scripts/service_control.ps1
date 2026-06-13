@@ -13,6 +13,7 @@ $LogDir = Join-Path $ProjectRoot "logs"
 $RunnerPidFile = Join-Path $LogDir "service_runner.pid"
 $StreamlitPidFile = Join-Path $LogDir "streamlit.pid"
 $SchedulerPidFile = Join-Path $LogDir "scheduler.pid"
+$FeishuBotPidFile = Join-Path $LogDir "feishu_bot.pid"
 $RunKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 $RunName = "FinanceTrackerServices"
 
@@ -72,16 +73,34 @@ function Stop-PidFileProcess {
 }
 
 function Stop-FinanceServices {
+    # Stop the supervisor first so it cannot respawn a child while shutdown is in progress.
+    Stop-PidFileProcess $RunnerPidFile
+    Start-Sleep -Milliseconds 500
     Stop-PidFileProcess $StreamlitPidFile
     Stop-PidFileProcess $SchedulerPidFile
-    Stop-PidFileProcess $RunnerPidFile
-    Remove-Item -LiteralPath $RunnerPidFile, $StreamlitPidFile, $SchedulerPidFile -ErrorAction SilentlyContinue
+    Stop-PidFileProcess $FeishuBotPidFile
+
+    # Clean up stale project-owned children left behind by an older PID file.
+    Get-CimInstance Win32_Process | Where-Object {
+        $_.CommandLine -and
+        $_.CommandLine.Contains($ProjectRoot) -and
+        (
+            $_.CommandLine.Contains("finance_tracker/app.py") -or
+            $_.CommandLine.Contains("finance_tracker\scheduler.py") -or
+            $_.CommandLine.Contains("finance_tracker\feishu_bot.py")
+        )
+    } | ForEach-Object {
+        Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+        Write-Host "Stopped stale project process $($_.ProcessId)"
+    }
+    Remove-Item -LiteralPath $RunnerPidFile, $StreamlitPidFile, $SchedulerPidFile, $FeishuBotPidFile -ErrorAction SilentlyContinue
 }
 
 function Show-FinanceStatus {
     $runner = Get-ProcessFromPidFile $RunnerPidFile
     $streamlit = Get-ProcessFromPidFile $StreamlitPidFile
     $scheduler = Get-ProcessFromPidFile $SchedulerPidFile
+    $feishuBot = Get-ProcessFromPidFile $FeishuBotPidFile
     $startupValue = Get-ItemPropertyValue -Path $RunKey -Name $RunName -ErrorAction SilentlyContinue
 
     [PSCustomObject]@{
@@ -90,6 +109,7 @@ function Show-FinanceStatus {
         ServiceRunnerProcessId = if ($runner) { $runner.Id } else { "" }
         StreamlitProcessId = if ($streamlit) { $streamlit.Id } else { "" }
         SchedulerProcessId = if ($scheduler) { $scheduler.Id } else { "" }
+        FeishuBotProcessId = if ($feishuBot) { $feishuBot.Id } else { "" }
         WindowlessStartupInstalled = [bool]$startupValue
         LogDirectory = $LogDir
     } | Format-List

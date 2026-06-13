@@ -1,12 +1,17 @@
 import datetime
+import json
 import os
 import re
 import sqlite3
+import uuid
 from pathlib import Path
 
 import pandas as pd
 
-from config import PROJECT_ROOT, load_env_file
+try:
+    from .config import PROJECT_ROOT, load_env_file
+except ImportError:
+    from config import PROJECT_ROOT, load_env_file
 
 load_env_file()
 DB_FILE = Path(os.getenv("FINANCE_DB_FILE", PROJECT_ROOT / "my_account_book.db"))
@@ -171,9 +176,21 @@ LEADING_ACTION_RE = re.compile(
 PAYMENT_SPLIT_RE = re.compile(r"(?:花了|花|付了|付|支付了|支付|交了|交|缴了|缴)")
 
 
+class FinanceConnection(sqlite3.Connection):
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 def connect():
     DB_FILE.parent.mkdir(parents=True, exist_ok=True)
-    return sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_FILE, timeout=10, factory=FinanceConnection)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=10000")
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
 
 
 def init_db():
@@ -209,7 +226,96 @@ def init_db():
         _ensure_column(conn, "transactions", "tags", "TEXT")
         _ensure_column(conn, "transactions", "is_need", "INTEGER DEFAULT 0")
         _ensure_column(conn, "transactions", "is_fixed", "INTEGER DEFAULT 0")
+        _ensure_column(conn, "transactions", "transaction_uid", "TEXT")
+        _ensure_column(conn, "transactions", "source", "TEXT DEFAULT 'streamlit'")
+        _ensure_column(conn, "transactions", "source_message_id", "TEXT")
+        _ensure_column(conn, "transactions", "feishu_record_id", "TEXT")
+        _ensure_column(conn, "transactions", "updated_at", "TEXT")
+        _ensure_column(conn, "transactions", "sync_status", "TEXT DEFAULT 'pending'")
+        _ensure_column(conn, "transactions", "sync_error", "TEXT")
+        _ensure_column(conn, "transactions", "source_user_open_id", "TEXT")
+        _ensure_column(conn, "transactions", "source_chat_id", "TEXT")
+        _ensure_column(conn, "transactions", "deleted_at", "TEXT")
+        _ensure_column(conn, "transactions", "deleted_by_open_id", "TEXT")
+        _ensure_column(conn, "transactions", "delete_reason", "TEXT")
+        _ensure_column(conn, "transactions", "status", "TEXT DEFAULT 'active'")
         _ensure_column(conn, "email_jobs", "created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS processed_events (
+                event_id TEXT PRIMARY KEY,
+                message_id TEXT,
+                sender_open_id TEXT,
+                status TEXT,
+                processed_at TEXT,
+                response_json TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sync_outbox (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                transaction_uid TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                status TEXT DEFAULT 'pending',
+                retry_count INTEGER DEFAULT 0,
+                last_error TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pending_actions (
+                action_id TEXT PRIMARY KEY,
+                intent TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                sender_open_id TEXT NOT NULL,
+                chat_id TEXT NOT NULL,
+                source_message_id TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                result_json TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                expires_at TEXT NOT NULL,
+                resolved_at TEXT
+            )
+            """
+        )
+        conn.execute("UPDATE transactions SET id = rowid WHERE id IS NULL")
+        conn.execute("UPDATE transactions SET source = 'streamlit' WHERE source IS NULL OR source = ''")
+        conn.execute("UPDATE transactions SET sync_status = 'pending' WHERE sync_status IS NULL OR sync_status = ''")
+        conn.execute("UPDATE transactions SET status = 'active' WHERE status IS NULL OR status = ''")
+        conn.execute("UPDATE transactions SET updated_at = COALESCE(updated_at, created_at, CURRENT_TIMESTAMP)")
+        missing_uids = conn.execute(
+            "SELECT rowid FROM transactions WHERE transaction_uid IS NULL OR transaction_uid = ''"
+        ).fetchall()
+        for (rowid,) in missing_uids:
+            conn.execute(
+                "UPDATE transactions SET transaction_uid = ? WHERE rowid = ?",
+                (str(uuid.uuid4()), rowid),
+            )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_transactions_uid ON transactions(transaction_uid)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_transactions_source_message ON transactions(source_message_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sync_outbox_status ON sync_outbox(status, id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_processed_events_message ON processed_events(message_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_transactions_owner_status "
+            "ON transactions(source_user_open_id, source_chat_id, status)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pending_actions_status_expiry "
+            "ON pending_actions(status, expires_at)"
+        )
 
 
 def _ensure_column(conn, table, column, definition):
@@ -221,13 +327,21 @@ def _ensure_column(conn, table, column, definition):
 def add_transaction(data):
     init_db()
     normalized = normalize_transaction(data)
+    transaction_uid = str(data.get("transaction_uid") or uuid.uuid4())
+    source = str(data.get("source") or "streamlit")
+    source_message_id = data.get("source_message_id")
+    source_user_open_id = data.get("source_user_open_id")
+    source_chat_id = data.get("source_chat_id")
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     with connect() as conn:
-        conn.execute(
+        cursor = conn.execute(
             """
             INSERT INTO transactions
-                (date, type, category, amount, description, tags, is_need, is_fixed)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (date, type, category, amount, description, tags, is_need, is_fixed,
+                 transaction_uid, source, source_message_id, source_user_open_id,
+                 source_chat_id, updated_at, sync_status, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'active')
             """,
             (
                 normalized["date"],
@@ -238,9 +352,43 @@ def add_transaction(data):
                 normalized["tags"],
                 normalized["is_need"],
                 normalized["is_fixed"],
+                transaction_uid,
+                source,
+                source_message_id,
+                source_user_open_id,
+                source_chat_id,
+                now,
             ),
         )
-    return normalized
+        transaction_id = cursor.lastrowid
+        conn.execute(
+            "UPDATE transactions SET id = COALESCE(id, ?) WHERE rowid = ?",
+            (transaction_id, transaction_id),
+        )
+        _enqueue_sync(conn, transaction_uid, "create")
+
+    return {
+        "id": int(transaction_id),
+        "transaction_uid": transaction_uid,
+        **normalized,
+        "source": source,
+        "source_message_id": source_message_id,
+        "source_user_open_id": source_user_open_id,
+        "source_chat_id": source_chat_id,
+        "status": "active",
+        "sync_status": "pending",
+    }
+
+
+def _enqueue_sync(conn, transaction_uid, operation):
+    conn.execute(
+        """
+        INSERT INTO sync_outbox
+            (transaction_uid, operation, status, retry_count, updated_at)
+        VALUES (?, ?, 'pending', 0, CURRENT_TIMESTAMP)
+        """,
+        (transaction_uid, operation),
+    )
 
 
 def normalize_transaction(data):
@@ -329,7 +477,7 @@ def update_email_job_status(job_id, status):
         conn.execute("UPDATE email_jobs SET status = ? WHERE id = ?", (status, int(job_id)))
 
 
-def load_transactions():
+def load_transactions(include_deleted=False):
     init_db()
     with connect() as conn:
         try:
@@ -346,11 +494,26 @@ def load_transactions():
                     created_at,
                     tags,
                     is_need,
-                    is_fixed
+                    is_fixed,
+                    transaction_uid,
+                    source,
+                    source_message_id,
+                    feishu_record_id,
+                    updated_at,
+                    sync_status,
+                    sync_error,
+                    source_user_open_id,
+                    source_chat_id,
+                    deleted_at,
+                    deleted_by_open_id,
+                    delete_reason,
+                    status
                 FROM transactions
+                WHERE (? = 1 OR status = 'active')
                 ORDER BY date DESC, rowid DESC
                 """,
                 conn,
+                params=[int(bool(include_deleted))],
             )
         except sqlite3.Error:
             return pd.DataFrame()
@@ -364,39 +527,88 @@ def load_transactions():
     df["tags"] = df["tags"].fillna("")
     df["is_need"] = pd.to_numeric(df["is_need"], errors="coerce").fillna(0).astype(int)
     df["is_fixed"] = pd.to_numeric(df["is_fixed"], errors="coerce").fillna(0).astype(int)
+    df["source"] = df["source"].fillna("streamlit")
+    df["sync_status"] = df["sync_status"].fillna("pending")
+    df["status"] = df["status"].fillna("active")
     return df
 
 
-def update_transactions_from_editor(edited_df):
+def update_transactions_from_editor(edited_df, original_rowids=None):
     init_db()
     if edited_df is None:
-        return
+        return {"updated": 0, "created": 0, "deleted": 0}
 
     save_df = edited_df.copy()
-    if save_df.empty:
-        with connect() as conn:
-            conn.execute("DELETE FROM transactions")
-        return
+    if "_rowid" not in save_df.columns:
+        raise ValueError("编辑数据缺少内部记录标识，请刷新页面后重试。")
+    original_rowids = {
+        int(value)
+        for value in (original_rowids or [])
+        if value is not None and str(value).strip()
+    }
+    if not original_rowids:
+        original_rowids = {
+            int(value)
+            for value in save_df["_rowid"].dropna().tolist()
+            if str(value).strip()
+        }
+    if not save_df.empty:
+        save_df["date"] = pd.to_datetime(
+            save_df["date"], errors="coerce"
+        ).dt.strftime("%Y-%m-%d")
+        save_df["type"] = save_df["type"].fillna("支出")
+        save_df["category"] = save_df["category"].fillna("其他")
+        save_df["amount"] = pd.to_numeric(
+            save_df["amount"], errors="coerce"
+        ).fillna(0.0)
+        save_df["description"] = save_df["description"].fillna("").astype(str)
+        save_df["tags"] = save_df["tags"].fillna("").astype(str)
+        save_df["is_need"] = save_df["is_need"].fillna(0).astype(int)
+        save_df["is_fixed"] = save_df["is_fixed"].fillna(0).astype(int)
 
-    save_df["date"] = pd.to_datetime(save_df["date"], errors="coerce").dt.strftime("%Y-%m-%d")
-    save_df["type"] = save_df["type"].fillna("支出")
-    save_df["category"] = save_df["category"].fillna("其他")
-    save_df["amount"] = pd.to_numeric(save_df["amount"], errors="coerce").fillna(0.0)
-    save_df["description"] = save_df["description"].fillna("").astype(str)
-    save_df["tags"] = save_df["tags"].fillna("").astype(str)
-    save_df["is_need"] = save_df["is_need"].fillna(0).astype(int)
-    save_df["is_fixed"] = save_df["is_fixed"].fillna(0).astype(int)
-
+    result = {"updated": 0, "created": 0, "deleted": 0}
     with connect() as conn:
-        current_rowids = {row[0] for row in conn.execute("SELECT rowid FROM transactions")}
+        current_rows = {
+            row[0]: {
+                "transaction_uid": row[1],
+                "date": row[2],
+                "type": row[3],
+                "category": row[4],
+                "amount": float(row[5] or 0),
+                "description": row[6] or "",
+                "tags": row[7] or "",
+                "is_need": int(row[8] or 0),
+                "is_fixed": int(row[9] or 0),
+            }
+            for row in conn.execute(
+                """
+                SELECT rowid, transaction_uid, date, type, category, amount,
+                       description, tags, is_need, is_fixed
+                FROM transactions WHERE status = 'active'
+                """
+            )
+            if row[0] in original_rowids
+        }
+        current_rowids = set(current_rows)
         edited_rowids = {
             int(value)
-            for value in save_df.get("_rowid", pd.Series(dtype="float")).dropna().tolist()
+            for value in save_df["_rowid"].dropna().tolist()
             if str(value).strip()
         }
 
         for rowid in current_rowids - edited_rowids:
-            conn.execute("DELETE FROM transactions WHERE rowid = ?", (rowid,))
+            conn.execute(
+                """
+                UPDATE transactions
+                SET status = 'deleted', deleted_at = CURRENT_TIMESTAMP,
+                    delete_reason = 'streamlit editor', updated_at = CURRENT_TIMESTAMP,
+                    sync_status = 'pending'
+                WHERE rowid = ? AND status = 'active'
+                """,
+                (rowid,),
+            )
+            _enqueue_sync(conn, current_rows[rowid]["transaction_uid"], "update")
+            result["deleted"] += 1
 
         for _, row in save_df.iterrows():
             rowid = row.get("_rowid")
@@ -411,6 +623,19 @@ def update_transactions_from_editor(edited_df):
                 int(row["is_fixed"]),
             )
             if pd.notna(rowid) and int(rowid) in current_rowids:
+                current = current_rows[int(rowid)]
+                if values == (
+                    current["date"],
+                    current["type"],
+                    current["category"],
+                    current["amount"],
+                    current["description"],
+                    current["tags"],
+                    current["is_need"],
+                    current["is_fixed"],
+                ):
+                    continue
+                transaction_uid = current["transaction_uid"]
                 conn.execute(
                     """
                     UPDATE transactions
@@ -421,20 +646,151 @@ def update_transactions_from_editor(edited_df):
                         description = ?,
                         tags = ?,
                         is_need = ?,
-                        is_fixed = ?
+                        is_fixed = ?,
+                        updated_at = CURRENT_TIMESTAMP,
+                        sync_status = 'pending',
+                        sync_error = ''
                     WHERE rowid = ?
+                      AND status = 'active'
                     """,
                     (*values, int(rowid)),
                 )
+                _enqueue_sync(conn, transaction_uid, "update")
+                result["updated"] += 1
             elif row["date"]:
-                conn.execute(
+                transaction_uid = str(uuid.uuid4())
+                cursor = conn.execute(
                     """
                     INSERT INTO transactions
-                        (date, type, category, amount, description, tags, is_need, is_fixed)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        (date, type, category, amount, description, tags, is_need, is_fixed,
+                         transaction_uid, source, updated_at, sync_status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'streamlit', CURRENT_TIMESTAMP, 'pending')
                     """,
-                    values,
+                    (*values, transaction_uid),
                 )
+                conn.execute(
+                    "UPDATE transactions SET id = COALESCE(id, ?) WHERE rowid = ?",
+                    (cursor.lastrowid, cursor.lastrowid),
+                )
+                _enqueue_sync(conn, transaction_uid, "create")
+                result["created"] += 1
+    return result
+
+
+def create_pending_action(
+    intent,
+    payload,
+    sender_open_id,
+    chat_id,
+    source_message_id=None,
+    ttl_minutes=10,
+):
+    init_db()
+    action_id = str(uuid.uuid4())
+    expires_at = (
+        datetime.datetime.now(datetime.UTC)
+        + datetime.timedelta(minutes=max(1, int(ttl_minutes)))
+    ).strftime("%Y-%m-%d %H:%M:%S")
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO pending_actions
+                (action_id, intent, payload_json, sender_open_id, chat_id,
+                 source_message_id, status, expires_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
+            """,
+            (
+                action_id,
+                str(intent),
+                json.dumps(payload, ensure_ascii=False),
+                str(sender_open_id or ""),
+                str(chat_id or ""),
+                source_message_id,
+                expires_at,
+            ),
+        )
+    return get_pending_action(action_id)
+
+
+def get_pending_action(action_id):
+    init_db()
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT action_id, intent, payload_json, sender_open_id, chat_id,
+                   source_message_id, status, result_json, created_at, expires_at,
+                   resolved_at
+            FROM pending_actions WHERE action_id = ?
+            """,
+            (str(action_id),),
+        ).fetchone()
+    if not row:
+        return None
+    keys = [
+        "action_id", "intent", "payload_json", "sender_open_id", "chat_id",
+        "source_message_id", "status", "result_json", "created_at", "expires_at",
+        "resolved_at",
+    ]
+    action = dict(zip(keys, row))
+    action["payload"] = json.loads(action.pop("payload_json") or "{}")
+    action["result"] = json.loads(action.pop("result_json") or "null")
+    return action
+
+
+def resolve_pending_action(action_id, status, result=None):
+    if status not in {"confirmed", "cancelled", "expired", "failed"}:
+        raise ValueError("Invalid pending action status.")
+    init_db()
+    with connect() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE pending_actions
+            SET status = ?, result_json = ?, resolved_at = CURRENT_TIMESTAMP
+            WHERE action_id = ? AND status IN ('pending', 'processing')
+            """,
+            (
+                status,
+                json.dumps(result, ensure_ascii=False) if result is not None else None,
+                str(action_id),
+            ),
+        )
+    return cursor.rowcount == 1
+
+
+def claim_pending_action(action_id):
+    init_db()
+    with connect() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE pending_actions
+            SET status = 'processing'
+            WHERE action_id = ? AND status = 'pending' AND expires_at > CURRENT_TIMESTAMP
+            """,
+            (str(action_id),),
+        )
+    return cursor.rowcount == 1
+
+
+def expire_pending_actions(now=None):
+    init_db()
+    now_text = (
+        now.strftime("%Y-%m-%d %H:%M:%S")
+        if isinstance(now, datetime.datetime)
+        else str(
+            now
+            or datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d %H:%M:%S")
+        )
+    )
+    with connect() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE pending_actions
+            SET status = 'expired', resolved_at = CURRENT_TIMESTAMP
+            WHERE status = 'pending' AND expires_at <= ?
+            """,
+            (now_text,),
+        )
+    return cursor.rowcount
 
 
 def parse_entry_text(text, default_date=None):

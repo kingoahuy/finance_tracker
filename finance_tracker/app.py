@@ -19,15 +19,14 @@ from ledger import (
     CATEGORIES,
     MONTHLY_BUDGET,
     add_email_job,
-    add_transaction,
     delete_job,
     get_pending_jobs,
     init_db,
     load_email_jobs,
     load_transactions,
-    parse_entry_text,
     update_transactions_from_editor,
 )
+from transaction_service import create_transactions_from_text
 
 # ================= 1. 核心配置 =================
 st.set_page_config(page_title="智账 Pro", layout="centered", page_icon="💸")
@@ -64,10 +63,6 @@ st.markdown("""
 
 
 # ================= 2. 本地账本操作 =================
-def save_transaction_extended(data):
-    add_transaction(data)
-
-
 def load_data():
     return load_transactions()
 
@@ -165,11 +160,9 @@ def main():
 
             if st.button("发送 🚀", type="primary", width="stretch") and user_input:
                 with st.spinner("正在解析并写入本地账本..."):
-                    items = parse_entry_text(user_input)
+                    items = create_transactions_from_text(user_input, source="streamlit")
                     if items:
                         for item in items:
-                            save_transaction_extended(item)
-
                             is_income = item.get('type') == '收入'
                             color = "green" if is_income else "red"
                             symbol = "+" if is_income else "-"
@@ -467,15 +460,33 @@ def main():
         st.markdown('<div class="css-card">', unsafe_allow_html=True)
         st.subheader("💾 数据管理")
         st.caption("在此处可以直接修改过往记录或删除数据")
+        show_deleted = st.toggle("显示已删除流水", value=False)
+        manage_df = load_transactions(include_deleted=show_deleted)
 
-        if not df.empty:
-            df['tags'] = df['tags'].fillna('')
-            df['is_need'] = df['is_need'].fillna(0).astype(bool)
-            df['is_fixed'] = df['is_fixed'].fillna(0).astype(bool)
+        if not manage_df.empty:
+            manage_df['tags'] = manage_df['tags'].fillna('')
+            manage_df['is_need'] = manage_df['is_need'].fillna(0).astype(bool)
+            manage_df['is_fixed'] = manage_df['is_fixed'].fillna(0).astype(bool)
+            active_manage_df = manage_df[
+                manage_df["status"].fillna("active") == "active"
+            ].copy()
+            active_manage_df["_delete"] = False
+            original_rowids = active_manage_df["_rowid"].astype(int).tolist()
 
             column_config = {
-                "_rowid": None,
-                "id": st.column_config.NumberColumn("ID", disabled=True),
+                "_delete": st.column_config.CheckboxColumn("删除"),
+                "_rowid": st.column_config.NumberColumn("ID", disabled=True),
+                "id": None,
+                "transaction_uid": None,
+                "source": None,
+                "source_message_id": None,
+                "feishu_record_id": None,
+                "updated_at": None,
+                "sync_status": None,
+                "sync_error": None,
+                "source_user_open_id": None,
+                "source_chat_id": None,
+                "deleted_by_open_id": None,
                 "date": st.column_config.DateColumn("日期", format="YYYY-MM-DD"),
                 "type": st.column_config.SelectboxColumn("类型", options=["支出", "收入"]),
                 "category": st.column_config.SelectboxColumn("分类", options=CATEGORIES),
@@ -484,8 +495,12 @@ def main():
                 "is_fixed": st.column_config.CheckboxColumn("固定?", help="是否为固定支出"),
             }
 
+            editable_columns = [
+                "_delete", "_rowid", "id", "date", "type", "category", "amount",
+                "description", "tags", "is_need", "is_fixed",
+            ]
             edited_df = st.data_editor(
-                df,
+                active_manage_df[editable_columns],
                 column_config=column_config,
                 num_rows="dynamic",
                 width="stretch",
@@ -494,9 +509,36 @@ def main():
             )
 
             if st.button("💾 保存数据修改", type="secondary"):
-                update_transactions_from_editor(edited_df)
-                st.success("数据库已更新！")
-                st.rerun()
+                try:
+                    rows_to_save = edited_df[
+                        ~edited_df["_delete"].fillna(False).astype(bool)
+                    ].drop(columns=["_delete"])
+                    save_result = update_transactions_from_editor(
+                        rows_to_save,
+                        original_rowids=original_rowids,
+                    )
+                    st.success(
+                        "数据库已更新："
+                        f"修改 {save_result['updated']} 条，"
+                        f"新增 {save_result['created']} 条，"
+                        f"删除 {save_result['deleted']} 条"
+                    )
+                    st.rerun()
+                except (ValueError, KeyError) as exc:
+                    st.error(str(exc))
+
+            if show_deleted:
+                deleted_df = manage_df[
+                    manage_df["status"].fillna("active") == "deleted"
+                ][
+                    [
+                        "id", "date", "type", "category", "amount",
+                        "description", "deleted_at", "delete_reason",
+                    ]
+                ]
+                if not deleted_df.empty:
+                    st.caption("已删除流水仅供查看，不能恢复或编辑")
+                    st.dataframe(deleted_df, hide_index=True, width="stretch")
         else:
             st.info("数据库暂无记录可管理")
         st.markdown('</div>', unsafe_allow_html=True)

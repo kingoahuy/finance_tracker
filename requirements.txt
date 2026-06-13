@@ -4,3 +4,5 @@ plotly
 streamlit-option-menu
 markdown
 openpyxl
+lark-oapi
+openai

@@ -11,7 +11,8 @@ if str(MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(MODULE_DIR))
 
 from email_service import generate_report_content, send_email_task
-from ledger import add_email_job, add_transaction, load_email_jobs, load_transactions, parse_entry_text
+from ledger import add_email_job, load_email_jobs, load_transactions
+from transaction_service import create_transaction, create_transactions_from_text
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -56,8 +57,7 @@ def main():
     if args.command == "add-text":
         if args.ensure_services:
             ensure_services()
-        records = parse_entry_text(args.text, args.date)
-        saved = [add_transaction(record) for record in records]
+        saved = create_transactions_from_text(args.text, args.date, source="cli")
         print(json.dumps(saved, ensure_ascii=False, indent=2))
         return
 
@@ -69,7 +69,7 @@ def main():
             json_text = base64.b64decode(json_text).decode("utf-8")
         payload = json.loads(_clean_json_arg(json_text))
         records = payload if isinstance(payload, list) else [payload]
-        saved = [add_transaction(record) for record in records]
+        saved = [create_transaction(record, source="cli") for record in records]
         print(json.dumps(saved, ensure_ascii=False, indent=2))
         return
 
