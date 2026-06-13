@@ -89,6 +89,23 @@ $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
 .\uninstall_startup.bat  # 卸载
 ```
 
+## 飞书移动记账
+
+项目支持飞书自建应用长连接机器人，与 Streamlit 共用同一个 SQLite 账本，并可将流水单向同步到飞书多维表格。
+
+普通记账、删除和修改会先返回飞书确认卡片，确认后才写入 SQLite。AI 只负责把自然语言解析为结构化动作；金额、日期、分类、用户归属和最终写入都由本地 Python 校验。未配置 AI 或请求失败时会自动使用本地解析器。
+
+```powershell
+.\scripts\backup_database.ps1
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\start_all.bat
+```
+
+配置步骤见：
+
+- [飞书机器人接入指南](docs/feishu_setup.md)
+- [飞书多维表格配置](docs/feishu_bitable_setup.md)
+
 ## 项目结构
 
 ```

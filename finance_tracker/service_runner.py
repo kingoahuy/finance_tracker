@@ -14,7 +14,12 @@ LOCK_FILE = LOG_DIR / "service_runner.lock"
 RUNNER_PID_FILE = LOG_DIR / "service_runner.pid"
 STREAMLIT_PID_FILE = LOG_DIR / "streamlit.pid"
 SCHEDULER_PID_FILE = LOG_DIR / "scheduler.pid"
+FEISHU_BOT_PID_FILE = LOG_DIR / "feishu_bot.pid"
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+sys.path.insert(0, str(PROJECT_ROOT / "finance_tracker"))
+from config import EnvFileValidationError
+from feishu_config import get_feishu_config
 
 
 def append_runner_log(message):
@@ -85,8 +90,10 @@ def main():
 
     streamlit = None
     scheduler = None
+    feishu_bot = None
     streamlit_handles = ()
     scheduler_handles = ()
+    feishu_handles = ()
 
     try:
         while True:
@@ -117,6 +124,30 @@ def main():
                 )
                 write_pid(SCHEDULER_PID_FILE, scheduler.pid)
 
+            try:
+                feishu_config = get_feishu_config()
+                should_run_feishu = (
+                    feishu_config.bot_enabled
+                    and feishu_config.bot_ready
+                    and (feishu_config.bootstrap_mode or bool(feishu_config.allowed_open_ids))
+                )
+            except EnvFileValidationError as exc:
+                append_runner_log(f"invalid environment configuration: {exc}")
+                should_run_feishu = False
+            if should_run_feishu and (feishu_bot is None or feishu_bot.poll() is not None):
+                close_handles(feishu_handles)
+                feishu_bot, *feishu_handles = start_process(
+                    "feishu_bot",
+                    ["finance_tracker/feishu_bot.py"],
+                )
+                write_pid(FEISHU_BOT_PID_FILE, feishu_bot.pid)
+            elif not should_run_feishu and feishu_bot is not None:
+                feishu_bot.terminate()
+                feishu_bot = None
+                close_handles(feishu_handles)
+                feishu_handles = ()
+                FEISHU_BOT_PID_FILE.unlink(missing_ok=True)
+
             time.sleep(5 if port_is_open(8501) else 2)
     except Exception as exc:
         append_runner_log(f"service runner error: {exc!r}")
@@ -124,7 +155,8 @@ def main():
     finally:
         close_handles(streamlit_handles)
         close_handles(scheduler_handles)
-        for path in (RUNNER_PID_FILE, STREAMLIT_PID_FILE, SCHEDULER_PID_FILE):
+        close_handles(feishu_handles)
+        for path in (RUNNER_PID_FILE, STREAMLIT_PID_FILE, SCHEDULER_PID_FILE, FEISHU_BOT_PID_FILE):
             path.unlink(missing_ok=True)
         lock_handle.close()
 

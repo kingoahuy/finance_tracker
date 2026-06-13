@@ -25,7 +25,7 @@ if str(MODULE_DIR) not in sys.path:
 
 # 确保 email_service.py 在同一目录下
 from email_service import send_email_task
-from ledger import DB_FILE, init_db
+from ledger import connect, init_db
 
 
 def init_scheduler_db():
@@ -40,15 +40,13 @@ def init_scheduler_db():
 def check_and_run_jobs():
     print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 正在检查定时任务...")
 
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-
-    # 1. 查找所有 status='pending' 且 时间 <= 当前时间 的任务
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
     try:
-        c.execute("SELECT id, report_date FROM email_jobs WHERE status='pending' AND schedule_time <= ?", (now_str,))
-        jobs = c.fetchall()
+        with connect() as conn:
+            jobs = conn.execute(
+                "SELECT id, report_date FROM email_jobs WHERE status='pending' AND schedule_time <= ?",
+                (now_str,),
+            ).fetchall()
     except sqlite3.OperationalError as e:
         print(f"⚠️ 查询出错: {e}")
         return
@@ -68,11 +66,19 @@ def check_and_run_jobs():
         # 3. 更新数据库状态
         new_status = 'sent' if success else 'failed'
         # 也可以记录错误信息，这里为了简单只更新状态
-        c.execute("UPDATE email_jobs SET status = ? WHERE id = ?", (new_status, job_id))
-        conn.commit()
+        with connect() as conn:
+            conn.execute("UPDATE email_jobs SET status = ? WHERE id = ?", (new_status, job_id))
         print(f"✅ 任务 ID:{job_id} 处理结束，结果: {new_status} ({msg})")
 
-    conn.close()
+    try:
+        from bitable_sync import auto_sync_enabled, sync_pending_transactions
+
+        if auto_sync_enabled():
+            result = sync_pending_transactions(limit=50)
+            if result["processed"]:
+                print(f"飞书多维表格同步：成功 {result['succeeded']}，失败 {result['failed']}。")
+    except Exception as e:
+        print(f"⚠️ 飞书多维表格重试失败: {e}")
 
 
 if __name__ == "__main__":
