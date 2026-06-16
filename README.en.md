@@ -32,19 +32,6 @@ This is not a commercial bookkeeping SaaS. It is a **local-first, privacy-friend
 
 ---
 
-## Preview
-
-Recommended screenshot paths:
-
-| Scenario | Suggested path |
-| --- | --- |
-| Streamlit dashboard | `docs/images/streamlit-dashboard.png` |
-| Feishu confirmation card | `docs/images/feishu-bot-card.png` |
-| Daily finance report | `docs/images/daily-report.png` |
-| Feishu Bitable sync | `docs/images/feishu-bitable.png` |
-
----
-
 ## Why This Project
 
 Many finance apps have two common issues:
