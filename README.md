@@ -15,9 +15,9 @@ A privacy-first, local SQLite-powered personal finance tracker with Feishu bot i
 
 ![Streamlit 记账面板](docs/images/streamlit-dashboard.png)
 
-<!-- 后续补充的截图 -->
-<!-- ![飞书确认卡片](docs/images/feishu-bot-card.png) -->
-<!-- ![每日财务日报](docs/images/daily-report.png) -->
+![飞书确认卡片](docs/images/feishu-bot-card.png)
+
+![每日财务日报](docs/images/daily-report.png)
 
 ---
 
