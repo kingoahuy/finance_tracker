@@ -25,6 +25,21 @@ class FakeMenuClient:
             "log_id": "menu-test",
         }
 
+    def send_card(self, receive_id, card, receive_id_type="chat_id"):
+        self.messages.append(
+            {
+                "receive_id": receive_id,
+                "card": card,
+                "receive_id_type": receive_id_type,
+            }
+        )
+        return {
+            "success": True,
+            "code": 0,
+            "message": "",
+            "log_id": "menu-card-test",
+        }
+
 
 def menu_event(event_key="today_bill", open_id="open-1"):
     return SimpleNamespace(
@@ -189,6 +204,31 @@ class FeishuMenuDispatcherTest(unittest.TestCase):
         )
         self.assertIsNone(response)
         self.assertEqual(client.messages, [])
+
+    @mock.patch.object(
+        feishu_bot,
+        "build_daily_report_card",
+        return_value={"header": {}, "elements": []},
+    )
+    @mock.patch.object(
+        feishu_bot,
+        "handle_menu_event",
+        return_value="日报短文本",
+    )
+    def test_daily_report_menu_sends_private_card(self, dispatcher, report_card):
+        client = FakeMenuClient()
+        response = feishu_bot.handle_menu_event_callback(
+            menu_event(event_key="daily_report"),
+            api_client=client,
+            config=menu_config(),
+        )
+        self.assertTrue(response["success"])
+        self.assertEqual(client.messages[0]["receive_id"], "open-1")
+        self.assertEqual(client.messages[0]["receive_id_type"], "open_id")
+        self.assertEqual(
+            client.messages[0]["card"],
+            report_card.return_value,
+        )
 
 
 if __name__ == "__main__":

@@ -14,8 +14,10 @@ try:
         BatchDeleteAppTableRecordRequestBody,
         Condition,
         CreateAppTableRecordRequest,
+        DeleteAppTableRequest,
         FilterInfo,
         ListAppTableFieldRequest,
+        ListAppTableRequest,
         ListAppTableRecordRequest,
         SearchAppTableRecordRequest,
         SearchAppTableRecordRequestBody,
@@ -238,14 +240,15 @@ class BitableSyncService:
                 return result
             page_token = getattr(data, "page_token", None)
 
-    def list_records(self):
+    def list_records(self, table_id=None):
+        table_id = table_id or self.config.bitable_table_id
         records = []
         page_token = None
         while True:
             builder = (
                 ListAppTableRecordRequest.builder()
                 .app_token(self.config.bitable_app_token)
-                .table_id(self.config.bitable_table_id)
+                .table_id(table_id)
                 .page_size(500)
                 .automatic_fields(True)
             )
@@ -319,14 +322,15 @@ class BitableSyncService:
         result["deleted_record_ids"] = deleted
         return result
 
-    def list_fields(self):
+    def list_fields(self, table_id=None):
+        table_id = table_id or self.config.bitable_table_id
         fields = []
         page_token = None
         while True:
             builder = (
                 ListAppTableFieldRequest.builder()
                 .app_token(self.config.bitable_app_token)
-                .table_id(self.config.bitable_table_id)
+                .table_id(table_id)
                 .page_size(100)
             )
             if page_token:
@@ -356,6 +360,55 @@ class BitableSyncService:
                 result.pop("data", None)
                 return result
             page_token = getattr(data, "page_token", None)
+
+    def list_tables(self):
+        tables = []
+        page_token = None
+        while True:
+            builder = (
+                ListAppTableRequest.builder()
+                .app_token(self.config.bitable_app_token)
+                .page_size(100)
+            )
+            if page_token:
+                builder = builder.page_token(page_token)
+            result = _sanitize_api_result(
+                response_result(
+                    self.client.bitable.v1.app_table.list(builder.build())
+                )
+            )
+            if not result["success"]:
+                result.pop("data", None)
+                result["tables"] = []
+                return result
+            data = result.get("data")
+            tables.extend(
+                {
+                    "table_id": str(getattr(item, "table_id", "") or ""),
+                    "name": str(getattr(item, "name", "") or ""),
+                    "revision": getattr(item, "revision", None),
+                }
+                for item in (getattr(data, "items", None) or [])
+            )
+            if not getattr(data, "has_more", False):
+                result.pop("data", None)
+                result["tables"] = tables
+                return result
+            page_token = getattr(data, "page_token", None)
+
+    def delete_table(self, table_id):
+        request = (
+            DeleteAppTableRequest.builder()
+            .app_token(self.config.bitable_app_token)
+            .table_id(str(table_id))
+            .build()
+        )
+        result = _sanitize_api_result(
+            response_result(self.client.bitable.v1.app_table.delete(request))
+        )
+        result.pop("data", None)
+        result["table_id"] = str(table_id)
+        return result
 
 
 def test_bitable_connection(service=None):
@@ -1196,6 +1249,193 @@ def cleanup_test_records(apply=False, service=None):
     return result
 
 
+def list_tables(service=None):
+    try:
+        config = service.config if service is not None else get_feishu_config()
+    except Exception as exc:
+        return _table_failure(f"读取飞书配置失败：{type(exc).__name__}")
+    missing = _missing_config(config)
+    if missing:
+        return _table_failure(
+            "飞书多维表格配置缺失：" + "、".join(missing)
+        )
+    try:
+        service = service or BitableSyncService(config=config)
+        tables_result = service.list_tables()
+    except Exception as exc:
+        return _table_failure(
+            "读取飞书数据表失败："
+            + _safe_exception_message(exc, config)
+        )
+    if not tables_result.get("success"):
+        return {
+            **_table_failure("读取飞书数据表失败。"),
+            **_one_result(tables_result),
+        }
+
+    original_table_id = str(config.bitable_table_id or "").strip()
+    tables = []
+    first_error = None
+    for table in tables_result.get("tables") or []:
+        table_id = str(table.get("table_id") or "").strip()
+        item = {
+            "name": str(table.get("name") or ""),
+            "table_id": table_id,
+            "is_original": table_id == original_table_id,
+            "field_count": None,
+            "record_count": None,
+            "field_error": None,
+            "record_error": None,
+        }
+        try:
+            fields_result = service.list_fields(table_id=table_id)
+        except Exception as exc:
+            fields_result = {
+                "success": False,
+                "code": -1,
+                "message": _safe_exception_message(exc, config),
+                "log_id": "",
+            }
+        if fields_result.get("success"):
+            item["field_count"] = len(fields_result.get("fields") or [])
+        else:
+            item["field_error"] = _api_error_dict(fields_result)
+            first_error = first_error or fields_result
+        try:
+            records_result = service.list_records(table_id=table_id)
+        except Exception as exc:
+            records_result = {
+                "success": False,
+                "code": -1,
+                "message": _safe_exception_message(exc, config),
+                "log_id": "",
+            }
+        if records_result.get("success"):
+            item["record_count"] = len(records_result.get("records") or [])
+        else:
+            item["record_error"] = _api_error_dict(records_result)
+            first_error = first_error or records_result
+        tables.append(item)
+
+    success = first_error is None
+    return {
+        "success": success,
+        "code": int(
+            (first_error.get("code", 0) if first_error else 0) or 0
+        ),
+        "message": (
+            "数据表列表读取完成。"
+            if success
+            else "数据表列表读取完成，但部分表的字段或记录统计失败。"
+        ),
+        "log_id": str(
+            first_error.get("log_id", "")
+            if first_error
+            else tables_result.get("log_id", "")
+        ),
+        "original_table_id": original_table_id,
+        "table_count": len(tables),
+        "tables": tables,
+    }
+
+
+def cleanup_summary_tables(
+    apply=False,
+    confirm_delete_summary_tables=False,
+    service=None,
+):
+    try:
+        config = service.config if service is not None else get_feishu_config()
+    except Exception as exc:
+        return _table_failure(f"读取飞书配置失败：{type(exc).__name__}")
+    missing = _missing_config(config)
+    if missing:
+        return _table_failure(
+            "飞书多维表格配置缺失：" + "、".join(missing)
+        )
+    if apply and not confirm_delete_summary_tables:
+        return {
+            **_table_failure(
+                "删除飞书非原始表需要额外确认参数："
+                "--confirm-delete-summary-tables"
+            ),
+            "mode": "apply",
+            "original_table_id": str(config.bitable_table_id or "").strip(),
+            "planned_delete_count": 0,
+            "planned_deletions": [],
+            "deleted_count": 0,
+            "deleted_tables": [],
+        }
+    try:
+        service = service or BitableSyncService(config=config)
+        tables_result = service.list_tables()
+    except Exception as exc:
+        return _table_failure(
+            "读取飞书数据表失败："
+            + _safe_exception_message(exc, config)
+        )
+    if not tables_result.get("success"):
+        return {
+            **_table_failure("读取飞书数据表失败。"),
+            **_one_result(tables_result),
+        }
+
+    original_table_id = str(config.bitable_table_id or "").strip()
+    planned = [
+        {
+            "name": str(table.get("name") or ""),
+            "table_id": str(table.get("table_id") or "").strip(),
+        }
+        for table in tables_result.get("tables") or []
+        if str(table.get("table_id") or "").strip()
+        and str(table.get("table_id") or "").strip() != original_table_id
+    ]
+    result = {
+        "success": True,
+        "code": 0,
+        "message": (
+            "飞书非原始表清理 dry-run 完成。"
+            if not apply
+            else "飞书非原始表清理完成。"
+        ),
+        "log_id": str(tables_result.get("log_id") or ""),
+        "mode": "apply" if apply else "dry-run",
+        "original_table_id": original_table_id,
+        "planned_delete_count": len(planned),
+        "planned_deletions": planned,
+        "deleted_count": 0,
+        "deleted_tables": [],
+        "original_table_protected": True,
+    }
+    if not apply or not planned:
+        return result
+
+    for item in planned:
+        table_id = item["table_id"]
+        if table_id == original_table_id:
+            continue
+        try:
+            delete_result = service.delete_table(table_id)
+        except Exception as exc:
+            delete_result = {
+                "success": False,
+                "code": -1,
+                "message": _safe_exception_message(exc, config),
+                "log_id": "",
+            }
+        if not delete_result.get("success"):
+            return {
+                **result,
+                **_one_result(delete_result),
+                "message": (
+                    "飞书非原始表删除失败。原始数据表未删除。"
+                ),
+            }
+        result["deleted_tables"].append(item)
+    result["deleted_count"] = len(result["deleted_tables"])
+    return result
+
+
 def _sync_rows(rows, service, progress_callback=None):
     total = len(rows)
     results = []
@@ -1557,6 +1797,18 @@ def _connection_failure(message, code=-1, log_id=""):
     }
 
 
+def _table_failure(message, code=-1, log_id=""):
+    return {
+        "success": False,
+        "code": int(code or -1),
+        "message": _sanitize_api_message(str(message)),
+        "log_id": str(log_id or ""),
+        "original_table_id": "",
+        "table_count": 0,
+        "tables": [],
+    }
+
+
 def _field_failure(message, code=-1, log_id=""):
     return {
         "success": False,
@@ -1565,6 +1817,16 @@ def _field_failure(message, code=-1, log_id=""):
         "log_id": str(log_id or ""),
         "missing_fields": [],
         "existing_fields": [],
+    }
+
+
+def _api_error_dict(result):
+    return {
+        "code": int(result.get("code", -1) or -1),
+        "message": _sanitize_api_message(
+            str(result.get("message") or "未知错误")
+        ),
+        "log_id": str(result.get("log_id") or ""),
     }
 
 
@@ -1711,20 +1973,40 @@ def main():
     group.add_argument("--audit-remote", action="store_true")
     group.add_argument("--dedupe-remote", action="store_true")
     group.add_argument("--cleanup-test-records", action="store_true")
+    group.add_argument("--list-tables", action="store_true")
+    group.add_argument("--cleanup-summary-tables", action="store_true")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--apply", action="store_true")
+    parser.add_argument(
+        "--confirm-delete-summary-tables",
+        action="store_true",
+        help="Required with --cleanup-summary-tables --apply.",
+    )
     args = parser.parse_args()
-    destructive_command = args.dedupe_remote or args.cleanup_test_records
+    destructive_command = (
+        args.dedupe_remote
+        or args.cleanup_test_records
+        or args.cleanup_summary_tables
+    )
     if destructive_command and not (args.dry_run or args.apply):
         parser.error(
-            "--dedupe-remote and --cleanup-test-records require "
-            "--dry-run or --apply"
+            "--dedupe-remote, --cleanup-test-records and "
+            "--cleanup-summary-tables require --dry-run or --apply"
         )
     if not destructive_command and (args.dry_run or args.apply):
         parser.error(
             "--dry-run/--apply can only be used with "
-            "--dedupe-remote or --cleanup-test-records"
+            "--dedupe-remote, --cleanup-test-records or "
+            "--cleanup-summary-tables"
+        )
+    if (
+        args.confirm_delete_summary_tables
+        and not args.cleanup_summary_tables
+    ):
+        parser.error(
+            "--confirm-delete-summary-tables can only be used with "
+            "--cleanup-summary-tables"
         )
     if args.check:
         result = check_bitable()
@@ -1752,8 +2034,17 @@ def main():
         result = audit_remote()
     elif args.dedupe_remote:
         result = dedupe_remote(apply=args.apply)
-    else:
+    elif args.cleanup_test_records:
         result = cleanup_test_records(apply=args.apply)
+    elif args.list_tables:
+        result = list_tables()
+    else:
+        result = cleanup_summary_tables(
+            apply=args.apply,
+            confirm_delete_summary_tables=(
+                args.confirm_delete_summary_tables
+            ),
+        )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     if not result.get("success"):
         raise SystemExit(1)

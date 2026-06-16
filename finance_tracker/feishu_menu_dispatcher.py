@@ -7,7 +7,7 @@ try:
         get_finance_overview,
     )
     from .bitable_sync import sync_pending_transactions
-    from .transaction_service import generate_daily_report
+    from .feishu_report import build_daily_report_text
 except ImportError:
     from analytics import (
         get_budget_warning,
@@ -15,7 +15,7 @@ except ImportError:
         get_finance_overview,
     )
     from bitable_sync import sync_pending_transactions
-    from transaction_service import generate_daily_report
+    from feishu_report import build_daily_report_text
 
 
 MENU_EVENT_TYPE = "application.bot.menu_v6"
@@ -102,7 +102,7 @@ def _budget_warning(_user_id):
 
 
 def _daily_report(_user_id):
-    return generate_daily_report()
+    return build_daily_report_text()
 
 
 def _sync_refresh(_user_id):

@@ -19,6 +19,9 @@ logs/
 *.pid
 *.lock
 
+# Development artifacts (screenshots, logs)
+artifacts/
+
 # Private exports & backups
 exports/
 backups/

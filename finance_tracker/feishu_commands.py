@@ -1,10 +1,18 @@
+import datetime
 import re
 
 try:
     from .ai_parser import parse_action
+    from .analytics import (
+        generate_finance_insights,
+        get_budget_warning,
+        get_category_expense_summary,
+        get_finance_overview,
+        get_tag_summary,
+    )
+    from .feishu_report import build_daily_report_card, build_daily_report_text
     from .ledger import get_feishu_session, save_feishu_session
     from .transaction_service import (
-        generate_daily_report,
         get_category_summary,
         get_recent_pending_action,
         get_month_summary,
@@ -17,9 +25,16 @@ try:
     )
 except ImportError:
     from ai_parser import parse_action
+    from analytics import (
+        generate_finance_insights,
+        get_budget_warning,
+        get_category_expense_summary,
+        get_finance_overview,
+        get_tag_summary,
+    )
+    from feishu_report import build_daily_report_card, build_daily_report_text
     from ledger import get_feishu_session, save_feishu_session
     from transaction_service import (
-        generate_daily_report,
         get_category_summary,
         get_recent_pending_action,
         get_month_summary,
@@ -39,7 +54,11 @@ HELP_TEXT = """智账 Pro 飞书记账
 - 本月账单
 - 最近5笔 / 最近N笔
 - 生成日报
-- 同步看板
+- 同步状态
+- 本月财务分析 / 本月消费报告
+- 这个月哪些地方花得最多
+- 本月预算情况
+- 本月标签分析
 - 撤销上一笔
 - 删除 ID 12
 
@@ -105,7 +124,18 @@ def _route_explicit(
         return {"success": True, "text": _format_today(get_today_summary()), "action": "today"}
     if text == "本月账单":
         return {"success": True, "text": _format_month(get_month_summary()), "action": "month"}
-
+    if text in {
+        "本月财务分析",
+        "本月消费报告",
+        "看看我的消费结构",
+    }:
+        return _run_finance_analysis("overview")
+    if text == "这个月哪些地方花得最多":
+        return _run_finance_analysis("category")
+    if text == "本月预算情况":
+        return _run_finance_analysis("budget")
+    if text == "本月标签分析":
+        return _run_finance_analysis("tag")
     recent_match = re.fullmatch(r"最近\s*(\d+)\s*笔", text)
     if recent_match:
         limit = max(1, min(int(recent_match.group(1)), 20))
@@ -123,11 +153,11 @@ def _route_explicit(
     if text == "生成日报":
         return {
             "success": True,
-            "text": generate_daily_report(),
+            "text": build_daily_report_text(),
+            "card": build_daily_report_card(),
             "action": "report",
-            "format": "markdown",
         }
-    if text == "同步看板":
+    if text in {"同步状态", "同步数据"}:
         return _run_sync(sync_callback, sync_dashboard_callback)
     if text == "撤销上一笔":
         return _queue_confirmation(
@@ -210,8 +240,21 @@ def _route_parsed_action(
             "text": _format_category(summary),
             "action": "category",
         }
+    if intent == "query_finance_analysis":
+        return _run_finance_analysis("overview")
+    if intent == "query_category_rank":
+        return _run_finance_analysis("category")
+    if intent == "query_budget_analysis":
+        return _run_finance_analysis("budget")
+    if intent == "query_tag_analysis":
+        return _run_finance_analysis("tag")
     if intent == "generate_report":
-        return {"success": True, "text": generate_daily_report(), "action": "report"}
+        return {
+            "success": True,
+            "text": build_daily_report_text(),
+            "card": build_daily_report_card(),
+            "action": "report",
+        }
     if intent == "sync_bitable":
         return _run_sync(sync_callback, sync_dashboard_callback)
     if intent == "help":
@@ -452,7 +495,7 @@ def sync_dashboard_card(dashboard, sync_result):
         "header": {
             "title": {
                 "tag": "plain_text",
-                "content": "飞书多维表格同步看板",
+                "content": "飞书多维表格同步状态",
             },
             "template": "green" if success else "orange",
         },
@@ -495,6 +538,104 @@ def _run_sync(sync_callback, sync_dashboard_callback=None):
         "card": sync_dashboard_card(dashboard, result),
         "action": "sync",
     }
+
+
+def _run_finance_analysis(focus="overview"):
+    today = datetime.date.today()
+    month = today.strftime("%Y-%m")
+    overview = get_finance_overview(today.replace(day=1), today)
+    categories = get_category_expense_summary(month)
+    tags = get_tag_summary(month)
+    warnings = get_budget_warning(month)
+    insights = generate_finance_insights(month)
+    return {
+        "success": True,
+        "text": _format_finance_analysis(
+            month,
+            overview,
+            categories,
+            tags,
+            warnings,
+            insights,
+            focus=focus,
+        ),
+        "action": {
+            "overview": "finance_analysis",
+            "category": "category_rank",
+            "budget": "budget_analysis",
+            "tag": "tag_analysis",
+        }.get(focus, "finance_analysis"),
+    }
+
+
+def _format_finance_analysis(
+    month,
+    overview,
+    categories,
+    tags,
+    warnings,
+    insights,
+    focus="overview",
+):
+    titles = {
+        "overview": "本月财务分析",
+        "category": "本月支出分类排行",
+        "budget": "本月预算情况",
+        "tag": "本月标签分析",
+    }
+    lines = [
+        f"{titles.get(focus, titles['overview'])}｜{month}",
+        "",
+        f"收入：¥{overview['total_income']:.2f}",
+        f"支出：¥{overview['total_expense']:.2f}",
+        f"结余：¥{overview['net_income']:.2f}",
+        "最大支出分类："
+        + (
+            f"{categories[0]['category']}（¥{categories[0]['amount']:.2f}）"
+            if categories
+            else "暂无"
+        ),
+        "",
+        "Top 3 支出分类：",
+    ]
+    lines.extend(
+        (
+            f"{index}. {item['category']} ¥{item['amount']:.2f}"
+            f"（{item['share']:.1f}%）"
+            for index, item in enumerate(categories[:3], 1)
+        )
+        if categories
+        else ["暂无支出分类数据"]
+    )
+    lines.extend(["", "Top 5 标签消费场景："])
+    lines.extend(
+        (
+            f"{index}. {item['tag']} ¥{item['amount']:.2f}"
+            f"（{item['count']} 笔）"
+            for index, item in enumerate(tags[:5], 1)
+        )
+        if tags
+        else ["暂无标签消费数据"]
+    )
+    risky = [item for item in warnings if item.get("status") != "正常"]
+    lines.extend(["", "预算预警："])
+    lines.extend(
+        (
+            f"- {item['category']}：{item['status']}，"
+            f"使用率 {item['usage_rate']:.1f}%"
+            for item in sorted(
+                risky,
+                key=lambda row: row.get("usage_rate", 0),
+                reverse=True,
+            )[:5]
+        )
+        if risky
+        else ["当前分类预算状态正常。"]
+    )
+    advice = str(insights.get("saving_advice") or "").strip()
+    if advice:
+        lines.extend(["", f"建议：{advice}"])
+    return "\n".join(lines)
 
 
 def _format_today(summary):

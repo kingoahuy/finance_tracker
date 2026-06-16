@@ -58,6 +58,61 @@ class FakeRemoteService:
         }
 
 
+class FakeTableService:
+    def __init__(self, tables=None):
+        self.config = fake_config(bitable_table_id="tbl-original")
+        self.tables = tables or [
+            {"name": "原始数据表", "table_id": "tbl-original"},
+            {"name": "月度汇总表", "table_id": "tbl-summary"},
+        ]
+        self.deleted = []
+
+    def list_tables(self):
+        return {
+            "success": True,
+            "code": 0,
+            "message": "success",
+            "log_id": "log-tables",
+            "tables": list(self.tables),
+        }
+
+    def list_fields(self, table_id=None):
+        return {
+            "success": True,
+            "code": 0,
+            "message": "success",
+            "log_id": f"log-fields-{table_id}",
+            "fields": [
+                {"field_name": "字段1"},
+                {"field_name": "字段2"},
+            ],
+        }
+
+    def list_records(self, table_id=None):
+        records = (
+            [remote_record("rec-1", "uid-1", 1)]
+            if table_id == "tbl-original"
+            else []
+        )
+        return {
+            "success": True,
+            "code": 0,
+            "message": "success",
+            "log_id": f"log-records-{table_id}",
+            "records": records,
+        }
+
+    def delete_table(self, table_id):
+        self.deleted.append(table_id)
+        return {
+            "success": True,
+            "code": 0,
+            "message": "success",
+            "log_id": f"log-delete-{table_id}",
+            "table_id": table_id,
+        }
+
+
 def remote_record(record_id, uid="", local_id=0, description="", created=0):
     return {
         "record_id": record_id,
@@ -522,6 +577,68 @@ class BitableDiagnosticsTest(unittest.TestCase):
         )
         self.assertEqual(result["planned_delete_count"], 3)
         self.assertEqual(service.deleted, [])
+
+    def test_list_tables_returns_counts_and_marks_original(self):
+        service = FakeTableService()
+        result = bitable_sync.list_tables(service=service)
+        self.assertTrue(result["success"])
+        self.assertEqual(result["original_table_id"], "tbl-original")
+        self.assertEqual(result["table_count"], 2)
+        original = next(
+            item for item in result["tables"] if item["is_original"]
+        )
+        self.assertEqual(original["table_id"], "tbl-original")
+        self.assertEqual(original["field_count"], 2)
+        self.assertEqual(original["record_count"], 1)
+
+    def test_cleanup_summary_tables_dry_run_is_nondestructive(self):
+        service = FakeTableService()
+        result = bitable_sync.cleanup_summary_tables(
+            apply=False,
+            service=service,
+        )
+        self.assertTrue(result["success"])
+        self.assertEqual(result["mode"], "dry-run")
+        self.assertEqual(result["planned_delete_count"], 1)
+        self.assertEqual(
+            result["planned_deletions"][0]["table_id"],
+            "tbl-summary",
+        )
+        self.assertEqual(service.deleted, [])
+
+    def test_cleanup_summary_tables_apply_requires_confirmation(self):
+        service = FakeTableService()
+        result = bitable_sync.cleanup_summary_tables(
+            apply=True,
+            service=service,
+        )
+        self.assertFalse(result["success"])
+        self.assertIn(
+            "--confirm-delete-summary-tables",
+            result["message"],
+        )
+        self.assertEqual(service.deleted, [])
+
+    def test_cleanup_summary_tables_never_deletes_original_table(self):
+        service = FakeTableService(
+            [
+                {"name": "原始数据表", "table_id": "tbl-original"},
+                {"name": "月度汇总表", "table_id": "tbl-summary"},
+                {"name": "分类月度汇总表", "table_id": "tbl-category"},
+            ]
+        )
+        result = bitable_sync.cleanup_summary_tables(
+            apply=True,
+            confirm_delete_summary_tables=True,
+            service=service,
+        )
+        self.assertTrue(result["success"])
+        self.assertEqual(
+            service.deleted,
+            ["tbl-summary", "tbl-category"],
+        )
+        self.assertNotIn("tbl-original", service.deleted)
+        self.assertTrue(result["original_table_protected"])
 
     def test_sync_one_returns_only_safe_identity_fields(self):
         record = transaction_service.create_transaction(

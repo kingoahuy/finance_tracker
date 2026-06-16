@@ -22,6 +22,7 @@ try:
     from .feishu_commands import result_card, route_command
     from .feishu_config import get_feishu_config, get_feishu_config_status
     from .feishu_menu_dispatcher import MENU_EVENT_TYPE, handle_menu_event
+    from .feishu_report import build_daily_report_card
     from .ledger import connect, init_db
     from .transaction_service import (
         cleanup_expired_pending_actions,
@@ -34,6 +35,7 @@ except ImportError:
     from feishu_commands import result_card, route_command
     from feishu_config import get_feishu_config, get_feishu_config_status
     from feishu_menu_dispatcher import MENU_EVENT_TYPE, handle_menu_event
+    from feishu_report import build_daily_report_card
     from ledger import connect, init_db
     from transaction_service import (
         cleanup_expired_pending_actions,
@@ -213,6 +215,17 @@ def send_feishu_text(open_id, text, api_client=None, config=None):
     return _safe_api_response(response)
 
 
+def send_feishu_card(open_id, card, api_client=None, config=None):
+    """Send a private Feishu card using an open_id."""
+    client = api_client or FeishuClient(config=config or get_feishu_config())
+    response = client.send_card(
+        str(open_id or ""),
+        card,
+        receive_id_type="open_id",
+    )
+    return _safe_api_response(response)
+
+
 def handle_menu_event_callback(data, api_client=None, config=None):
     """Handle application.bot.menu_v6 without entering the chat/AI route."""
     config = config or get_feishu_config()
@@ -240,12 +253,27 @@ def handle_menu_event_callback(data, api_client=None, config=None):
 
     reply_text = handle_menu_event(event_key, sender_open_id)
     try:
-        response = send_feishu_text(
-            sender_open_id,
-            reply_text,
-            api_client=api_client,
-            config=config,
-        )
+        if event_key == "daily_report":
+            response = send_feishu_card(
+                sender_open_id,
+                build_daily_report_card(),
+                api_client=api_client,
+                config=config,
+            )
+            if not response.get("success"):
+                response = send_feishu_text(
+                    sender_open_id,
+                    reply_text,
+                    api_client=api_client,
+                    config=config,
+                )
+        else:
+            response = send_feishu_text(
+                sender_open_id,
+                reply_text,
+                api_client=api_client,
+                config=config,
+            )
     except Exception as exc:
         LOGGER.exception(
             "Feishu menu response failed event_key=%s error=%s",

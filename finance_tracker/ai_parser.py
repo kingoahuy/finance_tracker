@@ -31,6 +31,10 @@ INTENTS = {
     "query_month_summary",
     "query_category_summary",
     "query_recent_transactions",
+    "query_finance_analysis",
+    "query_category_rank",
+    "query_budget_analysis",
+    "query_tag_analysis",
     "delete_last_transaction",
     "delete_transaction_by_id",
     "update_last_transaction",
@@ -382,6 +386,18 @@ def _local_action(text, base_date, reason, context=None):
 
 def _local_query_action(text, reason):
     compact = re.sub(r"\s+", "", text)
+    if compact in {
+        "本月财务分析",
+        "本月消费报告",
+        "看看我的消费结构",
+    }:
+        return _simple_action("query_finance_analysis", reason)
+    if compact == "这个月哪些地方花得最多":
+        return _simple_action("query_category_rank", reason)
+    if compact == "本月预算情况":
+        return _simple_action("query_budget_analysis", reason)
+    if compact == "本月标签分析":
+        return _simple_action("query_tag_analysis", reason)
     recent = re.search(r"最近(\d+)笔", compact)
     if recent:
         action = _simple_action("query_recent_transactions", reason)
@@ -417,7 +433,7 @@ def _local_query_action(text, reason):
         return _simple_action("query_month_summary", reason)
     if compact in {"生成今日日报", "生成日报"}:
         return _simple_action("generate_report", reason)
-    if compact == "同步看板":
+    if compact in {"同步状态", "同步数据"}:
         return _simple_action("sync_bitable", reason)
     return None
 
@@ -637,6 +653,14 @@ category 只能是：{categories}
    项目和收入来源中选择，每笔 1 到 5 个；不要输出无意义关键词。
 10. 示例：“今天下午在食堂吃饭花了10.4元”应包含
     tags=["食堂","晚餐","刚需"]、is_need=true、is_fixed=false。
+11. 财务分析查询只返回 intent，不编造统计结果：
+    “本月财务分析”“本月消费报告”“看看我的消费结构”
+    使用 query_finance_analysis；
+    “这个月哪些地方花得最多”使用 query_category_rank；
+    “本月预算情况”使用 query_budget_analysis；
+    “本月标签分析”使用 query_tag_analysis。
+12. “同步状态”“同步数据”使用 sync_bitable，requires_confirmation=false；
+    只同步 .env 中 FEISHU_BITABLE_TABLE_ID 对应的原始明细数据表。
 """.strip()
 
 

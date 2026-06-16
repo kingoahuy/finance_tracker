@@ -177,6 +177,44 @@ class AiParserTest(unittest.TestCase):
         self.assertEqual(result["updates"]["amount"], 30)
         self.assertEqual(result["transactions"], [])
 
+    def test_ai_finance_analysis_intent_is_accepted_without_confirmation(self):
+        completions = FakeCompletions(
+            {
+                "intent": "query_finance_analysis",
+                "confidence": 0.95,
+                "transactions": [],
+                "requires_confirmation": False,
+            }
+        )
+        result = ai_parser.parse_action(
+            "帮我深入看看这个月的消费结构",
+            client=self._client(completions),
+            config={
+                "enabled": True,
+                "require_confirmation": True,
+                "fallback_to_local": True,
+                "api_key": "test",
+                "base_url": "https://example.invalid",
+                "model": "test-model",
+                "timeout": 3,
+            },
+        )
+        self.assertEqual(result["intent"], "query_finance_analysis")
+        self.assertFalse(result["need_confirmation"])
+
+    def test_ai_detail_sync_intent_is_accepted(self):
+        action = ai_parser.validate_action(
+            {
+                "intent": "sync_bitable",
+                "confidence": 0.95,
+                "transactions": [],
+                "requires_confirmation": False,
+            },
+            "2026-06-15",
+        )
+        self.assertEqual(action["intent"], "sync_bitable")
+        self.assertFalse(action["requires_confirmation"])
+
 
 if __name__ == "__main__":
     unittest.main()

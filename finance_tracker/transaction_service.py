@@ -51,7 +51,6 @@ MUTATING_INTENTS = {
     "update_transaction_by_id",
 }
 
-
 def create_transactions_from_text(
     text,
     default_date=None,
@@ -80,17 +79,21 @@ def create_transactions(
     source_chat_id=None,
     auto_sync=True,
 ):
-    return [
+    saved_records = [
         create_transaction(
             record,
             source=source,
             source_message_id=source_message_id,
             source_user_open_id=source_user_open_id,
             source_chat_id=source_chat_id,
-            auto_sync=auto_sync,
+            auto_sync=False,
         )
         for record in records
     ]
+    if auto_sync:
+        for saved in saved_records:
+            _try_sync(saved["transaction_uid"])
+    return saved_records
 
 
 def create_transaction(
@@ -579,10 +582,11 @@ def _try_sync(transaction_uid):
             return
     if not auto_sync_enabled():
         return
-    try:
-        sync_transaction(transaction_uid)
-    except Exception:
-        return
+    if transaction_uid:
+        try:
+            sync_transaction(transaction_uid)
+        except Exception:
+            pass
 
 
 def _normalized_transactions():

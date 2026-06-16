@@ -1,4 +1,5 @@
 import json
+import os
 
 try:
     import lark_oapi as lark
@@ -12,6 +13,30 @@ try:
     from .feishu_config import get_feishu_config
 except ImportError:
     from feishu_config import get_feishu_config
+
+
+FEISHU_NO_PROXY_HOSTS = ("open.feishu.cn", ".feishu.cn")
+
+
+def configure_feishu_network():
+    """Keep Feishu API traffic independent from a transient system proxy."""
+    entries = []
+    for name in ("NO_PROXY", "no_proxy"):
+        entries.extend(
+            item.strip()
+            for item in os.environ.get(name, "").split(",")
+            if item.strip()
+        )
+    for host in FEISHU_NO_PROXY_HOSTS:
+        if host not in entries:
+            entries.append(host)
+    value = ",".join(dict.fromkeys(entries))
+    os.environ["NO_PROXY"] = value
+    os.environ["no_proxy"] = value
+    return value
+
+
+configure_feishu_network()
 
 
 class FeishuClient:
