@@ -1,4 +1,4 @@
-﻿# 智账 Pro
+# 智账 Pro
 
 **本地优先的个人智能记账系统** — 手机发消息记账，电脑看报表分析，数据始终在你手里。
 
@@ -13,12 +13,11 @@ A privacy-first, local SQLite-powered personal finance tracker with Feishu bot i
 
 ## 预览
 
-<!-- 将截图放入 docs/images/ 目录后取消注释 -->
-<!-- ![Streamlit 记账面板](docs/images/streamlit-dashboard.png) -->
+![Streamlit 记账面板](docs/images/streamlit-dashboard.png)
+
+<!-- 后续补充的截图 -->
 <!-- ![飞书确认卡片](docs/images/feishu-bot-card.png) -->
 <!-- ![每日财务日报](docs/images/daily-report.png) -->
-
-> 截图待补充：将实际运行截图放入 `docs/images/` 目录即可显示。
 
 ---
 
