@@ -1,4 +1,5 @@
 import datetime
+import hashlib
 import json
 import os
 import re
@@ -10,8 +11,10 @@ import pandas as pd
 
 try:
     from .config import PROJECT_ROOT, load_env_file
+    from .tagging import generate_tags
 except ImportError:
     from config import PROJECT_ROOT, load_env_file
+    from tagging import generate_tags
 
 load_env_file()
 DB_FILE = Path(os.getenv("FINANCE_DB_FILE", PROJECT_ROOT / "my_account_book.db"))
@@ -283,6 +286,22 @@ def init_db():
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS feishu_sessions (
+                session_id TEXT PRIMARY KEY,
+                sender_open_id_hash TEXT NOT NULL,
+                chat_id_hash TEXT NOT NULL,
+                short_history_json TEXT NOT NULL DEFAULT '[]',
+                pending_action_id TEXT,
+                pending_question TEXT,
+                last_intent TEXT,
+                expires_at TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
         conn.execute("UPDATE transactions SET id = rowid WHERE id IS NULL")
         conn.execute("UPDATE transactions SET source = 'streamlit' WHERE source IS NULL OR source = ''")
         conn.execute("UPDATE transactions SET sync_status = 'pending' WHERE sync_status IS NULL OR sync_status = ''")
@@ -315,6 +334,10 @@ def init_db():
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_pending_actions_status_expiry "
             "ON pending_actions(status, expires_at)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_feishu_sessions_expiry "
+            "ON feishu_sessions(expires_at)"
         )
 
 
@@ -407,17 +430,32 @@ def normalize_transaction(data):
     is_income = txn_type == "收入"
     default_need = int(not is_income and category in NEED_CATEGORIES)
     default_fixed = int(any(keyword in description for keyword in FIXED_KEYWORDS))
-    tags = merge_tags(data.get("tags", ""), auto_tags_for_transaction(str(date_value), txn_type, description))
+    amount = float(data.get("amount", 0) or 0)
+    is_need = int(bool(data.get("is_need", default_need)))
+    is_fixed = int(bool(data.get("is_fixed", default_fixed)))
+    tags = generate_tags(
+        {
+            "date": str(date_value),
+            "type": "收入" if is_income else "支出",
+            "category": category,
+            "amount": amount,
+            "description": description,
+            "tags": data.get("tags", ""),
+            "is_need": is_need,
+            "is_fixed": is_fixed,
+        },
+        raw_text=data.get("raw_text"),
+    )
 
     return {
         "date": str(date_value),
         "type": "收入" if is_income else "支出",
         "category": category,
-        "amount": float(data.get("amount", 0) or 0),
+        "amount": amount,
         "description": description,
         "tags": tags,
-        "is_need": int(bool(data.get("is_need", default_need))),
-        "is_fixed": int(bool(data.get("is_fixed", default_fixed))),
+        "is_need": is_need,
+        "is_fixed": is_fixed,
     }
 
 
@@ -612,15 +650,16 @@ def update_transactions_from_editor(edited_df, original_rowids=None):
 
         for _, row in save_df.iterrows():
             rowid = row.get("_rowid")
+            normalized = normalize_transaction(row.to_dict())
             values = (
-                row["date"],
-                row["type"],
-                row["category"],
-                float(row["amount"]),
-                row["description"],
-                row["tags"],
-                int(row["is_need"]),
-                int(row["is_fixed"]),
+                normalized["date"],
+                normalized["type"],
+                normalized["category"],
+                normalized["amount"],
+                normalized["description"],
+                normalized["tags"],
+                normalized["is_need"],
+                normalized["is_fixed"],
             )
             if pd.notna(rowid) and int(rowid) in current_rowids:
                 current = current_rows[int(rowid)]
@@ -737,6 +776,25 @@ def get_pending_action(action_id):
     return action
 
 
+def get_latest_pending_action(sender_open_id, chat_id):
+    init_db()
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT action_id
+            FROM pending_actions
+            WHERE sender_open_id = ?
+              AND chat_id = ?
+              AND status = 'pending'
+              AND expires_at > CURRENT_TIMESTAMP
+            ORDER BY created_at DESC, rowid DESC
+            LIMIT 1
+            """,
+            (str(sender_open_id or ""), str(chat_id or "")),
+        ).fetchone()
+    return get_pending_action(row[0]) if row else None
+
+
 def resolve_pending_action(action_id, status, result=None):
     if status not in {"confirmed", "cancelled", "expired", "failed"}:
         raise ValueError("Invalid pending action status.")
@@ -791,6 +849,194 @@ def expire_pending_actions(now=None):
             (now_text,),
         )
     return cursor.rowcount
+
+
+def update_pending_action_payload(action_id, payload):
+    init_db()
+    with connect() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE pending_actions
+            SET payload_json = ?
+            WHERE action_id = ? AND status = 'pending'
+              AND expires_at > CURRENT_TIMESTAMP
+            """,
+            (
+                json.dumps(payload, ensure_ascii=False),
+                str(action_id),
+            ),
+        )
+    return cursor.rowcount == 1
+
+
+def get_feishu_session(sender_open_id, chat_id, now=None):
+    init_db()
+    session_id, sender_hash, chat_hash = _session_identity(
+        sender_open_id,
+        chat_id,
+    )
+    now_text = _utc_text(now)
+    with connect() as conn:
+        conn.execute(
+            "DELETE FROM feishu_sessions WHERE expires_at <= ?",
+            (now_text,),
+        )
+        row = conn.execute(
+            """
+            SELECT session_id, sender_open_id_hash, chat_id_hash,
+                   short_history_json, pending_action_id,
+                   pending_question, last_intent, expires_at,
+                   created_at, updated_at
+            FROM feishu_sessions
+            WHERE session_id = ?
+            """,
+            (session_id,),
+        ).fetchone()
+    if not row:
+        return {
+            "session_id": session_id,
+            "sender_open_id_hash": sender_hash,
+            "chat_id_hash": chat_hash,
+            "short_history": [],
+            "pending_action_id": None,
+            "pending_question": None,
+            "last_intent": None,
+            "expires_at": None,
+        }
+    return {
+        "session_id": row[0],
+        "sender_open_id_hash": row[1],
+        "chat_id_hash": row[2],
+        "short_history": _safe_history(row[3]),
+        "pending_action_id": row[4],
+        "pending_question": row[5],
+        "last_intent": row[6],
+        "expires_at": row[7],
+        "created_at": row[8],
+        "updated_at": row[9],
+    }
+
+
+def save_feishu_session(
+    sender_open_id,
+    chat_id,
+    short_history=None,
+    pending_action_id=None,
+    pending_question=None,
+    last_intent=None,
+    ttl_minutes=10,
+):
+    init_db()
+    session_id, sender_hash, chat_hash = _session_identity(
+        sender_open_id,
+        chat_id,
+    )
+    history = _sanitize_history(short_history)
+    expires_at = (
+        datetime.datetime.now(datetime.UTC)
+        + datetime.timedelta(minutes=max(1, int(ttl_minutes)))
+    ).strftime("%Y-%m-%d %H:%M:%S")
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO feishu_sessions
+                (session_id, sender_open_id_hash, chat_id_hash,
+                 short_history_json, pending_action_id,
+                 pending_question, last_intent, expires_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(session_id) DO UPDATE SET
+                short_history_json = excluded.short_history_json,
+                pending_action_id = excluded.pending_action_id,
+                pending_question = excluded.pending_question,
+                last_intent = excluded.last_intent,
+                expires_at = excluded.expires_at,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                session_id,
+                sender_hash,
+                chat_hash,
+                json.dumps(history, ensure_ascii=False),
+                pending_action_id,
+                str(pending_question or "")[:200] or None,
+                str(last_intent or "")[:80] or None,
+                expires_at,
+            ),
+        )
+    return get_feishu_session(sender_open_id, chat_id)
+
+
+def clear_feishu_session_pending(sender_open_id, chat_id):
+    session = get_feishu_session(sender_open_id, chat_id)
+    return save_feishu_session(
+        sender_open_id,
+        chat_id,
+        short_history=session.get("short_history") or [],
+        pending_action_id=None,
+        pending_question=None,
+        last_intent=session.get("last_intent"),
+    )
+
+
+def _session_identity(sender_open_id, chat_id):
+    sender_hash = hashlib.sha256(
+        str(sender_open_id or "").encode("utf-8")
+    ).hexdigest()
+    chat_hash = hashlib.sha256(
+        str(chat_id or "").encode("utf-8")
+    ).hexdigest()
+    session_id = hashlib.sha256(
+        f"{sender_hash}:{chat_hash}".encode("ascii")
+    ).hexdigest()
+    return session_id, sender_hash, chat_hash
+
+
+def _sanitize_history(history):
+    safe = []
+    for item in list(history or [])[-6:]:
+        if not isinstance(item, dict):
+            continue
+        clean = {
+            key: value
+            for key, value in item.items()
+            if key in {
+                "intent", "reply", "draft_transaction",
+                "pending_action_id", "query",
+            }
+        }
+        if "reply" in clean:
+            clean["reply"] = str(clean["reply"])[:160]
+        if isinstance(clean.get("draft_transaction"), dict):
+            draft = clean["draft_transaction"]
+            clean["draft_transaction"] = {
+                key: (
+                    str(draft.get(key) or "")[:120]
+                    if key in {"description", "tags"}
+                    else draft.get(key)
+                )
+                for key in {
+                    "date", "type", "category", "amount",
+                    "description", "tags", "is_need", "is_fixed",
+                }
+            }
+        safe.append(clean)
+    return safe
+
+
+def _safe_history(raw):
+    try:
+        value = json.loads(raw or "[]")
+    except (TypeError, json.JSONDecodeError):
+        return []
+    return _sanitize_history(value if isinstance(value, list) else [])
+
+
+def _utc_text(value=None):
+    if isinstance(value, datetime.datetime):
+        current = value
+    else:
+        current = datetime.datetime.now(datetime.UTC)
+    return current.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def parse_entry_text(text, default_date=None):
@@ -853,7 +1099,22 @@ def parse_amount_entries(text, entry_date):
 
         amount = float(match.group(1))
         txn_type, category = classify_text(description)
-        auto_tags = auto_tags_for_transaction(entry_date, txn_type, description)
+        is_need = int(txn_type == "支出" and category in NEED_CATEGORIES)
+        is_fixed = int(
+            any(keyword.lower() in description.lower() for keyword in FIXED_KEYWORDS)
+        )
+        tags = generate_tags(
+            {
+                "date": entry_date,
+                "type": txn_type,
+                "category": category,
+                "amount": amount,
+                "description": description,
+                "is_need": is_need,
+                "is_fixed": is_fixed,
+            },
+            raw_text=text,
+        )
         records.append(
             {
                 "date": entry_date,
@@ -861,9 +1122,9 @@ def parse_amount_entries(text, entry_date):
                 "category": category,
                 "amount": amount,
                 "description": description,
-                "tags": ",".join(auto_tags),
-                "is_need": int(txn_type == "支出" and category in NEED_CATEGORIES),
-                "is_fixed": int(any(keyword.lower() in description.lower() for keyword in FIXED_KEYWORDS)),
+                "tags": tags,
+                "is_need": is_need,
+                "is_fixed": is_fixed,
                 "local_comment": "已按本地规则识别，未调用外部 AI。",
             }
         )
@@ -951,34 +1212,11 @@ def classify_text(text):
 
 
 def auto_tags_for_transaction(date_value, txn_type, description=""):
-    try:
-        txn_date = _coerce_date(date_value)
-    except Exception:
-        return []
-
-    tags = []
-    for rule in SPECIAL_TAG_RULES:
-        if rule.get("type") and rule["type"] != txn_type:
-            continue
-        start_date = _coerce_date(rule["start_date"])
-        end_date = _coerce_date(rule["end_date"])
-        if start_date <= txn_date <= end_date:
-            tags.append(rule["tag"])
-            continue
-        if rule["tag"] in str(description):
-            tags.append(rule["tag"])
-    return tags
-
-
-def merge_tags(existing_tags, new_tags):
-    tags = []
-    if isinstance(existing_tags, list):
-        raw_tags = existing_tags
-    else:
-        raw_tags = str(existing_tags or "").replace("，", ",").split(",")
-
-    for tag in [*raw_tags, *new_tags]:
-        clean_tag = str(tag).strip()
-        if clean_tag and clean_tag not in tags:
-            tags.append(clean_tag)
-    return ",".join(tags)
+    return generate_tags(
+        {
+            "date": date_value,
+            "type": txn_type,
+            "category": "其他",
+            "description": description,
+        }
+    ).split(",")

@@ -25,6 +25,14 @@ class BitableDeletedSyncTest(unittest.TestCase):
         )
         self.assertEqual(fields[FIELD_MAP["status"]], "deleted")
         self.assertEqual(fields[FIELD_MAP["delete_reason"]], "user request")
+        self.assertNotEqual(
+            fields[FIELD_MAP["deleted_by_open_id"]],
+            "open-1",
+        )
+        self.assertEqual(
+            len(fields[FIELD_MAP["deleted_by_open_id"]]),
+            12,
+        )
         self.assertEqual(
             fields[FIELD_MAP["deleted_at"]],
             int(datetime.datetime(2026, 6, 13, 12, 30).timestamp() * 1000),

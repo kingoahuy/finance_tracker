@@ -60,6 +60,26 @@ class FeishuConfigTest(unittest.TestCase):
         self.assertEqual(status["allowed_user_count"], 0)
         self.assertTrue(status["validation_errors"])
 
+    def test_bitable_settings_are_loaded_from_env_file(self):
+        path = self._env_file(
+            "FEISHU_APP_ID=cli_test\n"
+            "FEISHU_APP_SECRET=test_secret\n"
+            "FEISHU_BITABLE_APP_TOKEN=base_test\n"
+            "FEISHU_BITABLE_TABLE_ID=tbl_test\n"
+            "FEISHU_BITABLE_SYNC_ENABLED=true\n"
+            "FEISHU_AUTO_SYNC=false\n"
+        )
+        with mock.patch.dict(os.environ, {}, clear=True):
+            config = get_feishu_config(env_path=path)
+            status = get_feishu_config_status(config=config)
+        self.assertEqual(config.bitable_app_token, "base_test")
+        self.assertEqual(config.bitable_table_id, "tbl_test")
+        self.assertTrue(config.bitable_sync_enabled)
+        self.assertFalse(config.auto_sync)
+        self.assertTrue(status["bitable_app_token_configured"])
+        self.assertTrue(status["bitable_table_id_configured"])
+        self.assertFalse(status["bitable_auto_sync"])
+
 
 if __name__ == "__main__":
     unittest.main()

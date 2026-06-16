@@ -64,6 +64,61 @@ class TransactionServiceTest(unittest.TestCase):
         self.assertEqual(summary["balance"], 900)
         self.assertEqual(summary["top_categories"][0]["category"], "餐饮")
 
+    def test_create_transaction_syncs_original_detail_only(self):
+        with mock.patch.object(transaction_service, "_try_sync") as sync:
+            created = transaction_service.create_transaction(
+                {
+                    "date": "2026-06-13",
+                    "type": "支出",
+                    "category": "餐饮",
+                    "amount": 25,
+                    "description": "午饭",
+                }
+            )
+        sync.assert_called_once_with(created["transaction_uid"])
+
+    def test_batch_create_syncs_each_original_detail_once(self):
+        with mock.patch.object(transaction_service, "_try_sync") as sync:
+            created = transaction_service.create_transactions(
+                [
+                    {
+                        "date": "2026-06-13",
+                        "type": "支出",
+                        "category": "餐饮",
+                        "amount": 25,
+                        "description": "午饭",
+                    },
+                    {
+                        "date": "2026-06-14",
+                        "type": "支出",
+                        "category": "交通",
+                        "amount": 4,
+                        "description": "地铁",
+                    },
+                ]
+            )
+        self.assertEqual(len(created), 2)
+        self.assertEqual(sync.call_count, 2)
+        sync.assert_has_calls(
+            [
+                mock.call(created[0]["transaction_uid"]),
+                mock.call(created[1]["transaction_uid"]),
+            ]
+        )
+
+    @mock.patch("finance_tracker.bitable_sync.sync_transaction")
+    @mock.patch(
+        "finance_tracker.bitable_sync.auto_sync_enabled",
+        return_value=True,
+    )
+    def test_try_sync_updates_original_detail_table_only(
+        self,
+        _auto_sync_enabled,
+        sync_transaction,
+    ):
+        transaction_service._try_sync("uid-1")
+        sync_transaction.assert_called_once_with("uid-1")
+
 
 if __name__ == "__main__":
     unittest.main()

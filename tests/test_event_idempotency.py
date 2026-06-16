@@ -10,8 +10,9 @@ from finance_tracker.feishu_config import FeishuConfig
 
 
 class FakeClient:
-    def __init__(self):
+    def __init__(self, card_success=True):
         self.messages = []
+        self.card_success = card_success
 
     def send_text(self, chat_id, text):
         self.messages.append((chat_id, text))
@@ -19,6 +20,13 @@ class FakeClient:
 
     def send_card(self, chat_id, card):
         self.messages.append((chat_id, card))
+        if not self.card_success:
+            return {
+                "success": False,
+                "code": 230099,
+                "message": "Failed to create card content",
+                "log_id": "log-card-failed",
+            }
         return {"success": True, "code": 0, "message": "", "log_id": "test"}
 
 
@@ -98,6 +106,58 @@ class EventIdempotencyTest(unittest.TestCase):
         self.assertEqual(len(client.messages), 1)
         self.assertEqual(first["command"], "create_transactions")
         self.assertEqual(second["command"], "create_transactions")
+
+    def test_card_failure_falls_back_to_confirmation_text(self):
+        client = FakeClient(card_success=False)
+        local_parser = lambda text: {
+            "intent": "create_transactions",
+            "confidence": 0.9,
+            "transactions": [
+                {
+                    "date": "2026-06-14",
+                    "type": "支出",
+                    "category": "餐饮",
+                    "amount": 10.4,
+                    "description": "食堂吃饭",
+                    "tags": "",
+                    "is_need": 1,
+                    "is_fixed": 0,
+                }
+            ],
+            "transaction_id": None,
+            "updates": {},
+            "limit": 5,
+        }
+        with mock.patch(
+            "finance_tracker.feishu_commands.parse_action",
+            local_parser,
+        ):
+            result = feishu_bot.handle_message_event(
+                fake_event("event-fallback", "message-fallback"),
+                client,
+                self.config,
+            )
+        self.assertFalse(result["card_response"]["success"])
+        self.assertTrue(result["fallback_text_response"]["success"])
+        self.assertEqual(len(client.messages), 2)
+        fallback_text = client.messages[1][1]
+        self.assertIn("¥10.40", fallback_text)
+        self.assertIn("餐饮", fallback_text)
+        self.assertIn("请回复 确认 或 取消", fallback_text)
+        with ledger.connect() as conn:
+            response_json = conn.execute(
+                """
+                SELECT response_json FROM processed_events
+                WHERE event_id = 'event-fallback'
+                """
+            ).fetchone()[0]
+            pending_count = conn.execute(
+                "SELECT COUNT(*) FROM pending_actions"
+            ).fetchone()[0]
+        saved = json.loads(response_json)
+        self.assertIn("card_response", saved)
+        self.assertIn("fallback_text_response", saved)
+        self.assertEqual(pending_count, 1)
 
 
 if __name__ == "__main__":

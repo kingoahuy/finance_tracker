@@ -69,6 +69,35 @@ class PendingActionsTest(unittest.TestCase):
             pending["action_id"], "confirm", "open-1", "chat-1"
         )
         self.assertEqual(result["status"], "expired")
+        self.assertEqual(
+            result["message"],
+            "这条待确认操作已过期，请重新发送记账内容。",
+        )
+        with ledger.connect() as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM transactions"
+            ).fetchone()[0]
+        self.assertEqual(count, 0)
+
+    def test_cleanup_expired_pending_actions(self):
+        pending = transaction_service.queue_action(
+            self._action(), "open-1", "chat-1", "msg-1"
+        )
+        with ledger.connect() as conn:
+            conn.execute(
+                """
+                UPDATE pending_actions
+                SET expires_at = '2000-01-01 00:00:00'
+                WHERE action_id = ?
+                """,
+                (pending["action_id"],),
+            )
+        cleaned = transaction_service.cleanup_expired_pending_actions()
+        self.assertEqual(cleaned, 1)
+        self.assertEqual(
+            ledger.get_pending_action(pending["action_id"])["status"],
+            "expired",
+        )
 
 
 if __name__ == "__main__":

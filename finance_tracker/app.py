@@ -14,7 +14,18 @@ if str(MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(MODULE_DIR))
 
 from config import save_env_values
+from bitable_sync import (
+    check_bitable,
+    full_sync,
+    get_sync_dashboard,
+    reset_failed_sync,
+    sync_one_pending,
+    sync_pending_transactions,
+    test_bitable_connection,
+    validate_fields,
+)
 from email_service import generate_report_content, get_mail_config_status
+from feishu_config import get_feishu_config_status
 from ledger import (
     CATEGORIES,
     MONTHLY_BUDGET,
@@ -455,6 +466,161 @@ def main():
             st.dataframe(job_history, hide_index=True, width="stretch")
         else:
             st.info("暂无任务记录")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        st.markdown('<div class="css-card">', unsafe_allow_html=True)
+        st.subheader("📊 飞书多维表格同步管理")
+        dashboard = get_sync_dashboard(check_fields=False)
+        if "bitable_field_status" not in st.session_state:
+            with st.spinner("正在读取飞书字段状态..."):
+                st.session_state["bitable_field_status"] = (
+                    validate_fields()
+                )
+        config_state = dashboard["configuration"]
+        field_state = st.session_state["bitable_field_status"]
+
+        config_col, table_col, field_col = st.columns(3)
+        config_col.metric(
+            "飞书机器人配置",
+            "完整" if config_state["bot_ready"] else "缺失",
+        )
+        table_col.metric(
+            "多维表格配置",
+            "完整" if config_state["bitable_ready"] else "缺失",
+        )
+        field_col.metric(
+            "字段检查",
+            (
+                "通过"
+                if field_state["success"]
+                else "未通过"
+            ),
+        )
+
+        total_col, synced_col, pending_col = st.columns(3)
+        total_col.metric("本地总流水", dashboard["counts"]["total"])
+        synced_col.metric("已同步", dashboard["counts"]["synced"])
+        pending_col.metric("待同步", dashboard["counts"]["pending"])
+        failed_col, record_col, auto_col = st.columns(3)
+        failed_col.metric("失败", dashboard["counts"]["failed"])
+        record_col.metric(
+            "已写入 record_id",
+            dashboard["counts"]["record_id"],
+        )
+        auto_col.metric(
+            "自动同步",
+            "开启" if config_state["auto_sync"] else "关闭",
+        )
+
+        if not config_state["bitable_ready"]:
+            bitable_status = get_feishu_config_status()
+            st.warning(
+                "多维表格配置缺失："
+                + "、".join(bitable_status["bitable_missing"])
+            )
+        if field_state["success"] is False:
+            st.error(
+                f"字段检查失败：code={field_state['code']}，"
+                f"message={field_state['message']}，"
+                f"log_id={field_state['log_id'] or '-'}"
+            )
+            if field_state.get("missing_fields"):
+                st.code("\n".join(field_state["missing_fields"]))
+
+        if dashboard["recent_errors"]:
+            with st.expander("最近 5 条同步错误", expanded=False):
+                st.dataframe(
+                    pd.DataFrame(dashboard["recent_errors"]),
+                    hide_index=True,
+                    width="stretch",
+                )
+        else:
+            st.caption("最近没有同步错误。")
+
+        def show_api_result(result):
+            if result.get("success"):
+                st.success(result.get("message") or "操作成功。")
+            else:
+                st.error(
+                    f"操作失败：code={result.get('code', -1)}，"
+                    f"message={result.get('message', '未知错误')}，"
+                    f"log_id={result.get('log_id') or '-'}"
+                )
+
+        button_row_1 = st.columns(3)
+        with button_row_1[0]:
+            if st.button("🔌 测试连接", width="stretch"):
+                with st.spinner("正在测试飞书连接..."):
+                    show_api_result(test_bitable_connection())
+        with button_row_1[1]:
+            if st.button("🔍 检查字段", width="stretch"):
+                with st.spinner("正在读取字段..."):
+                    result = validate_fields()
+                st.session_state["bitable_field_status"] = result
+                show_api_result(result)
+                if result.get("missing_fields"):
+                    st.code("\n".join(result["missing_fields"]))
+        with button_row_1[2]:
+            if st.button("🧪 单条测试同步", width="stretch"):
+                with st.spinner("正在同步一条流水..."):
+                    result = sync_one_pending()
+                show_api_result(result)
+                if result.get("local_id") is not None:
+                    st.caption(
+                        f"本地ID：{result['local_id']}｜"
+                        f"UID：{result['transaction_uid_prefix']}"
+                    )
+
+        button_row_2 = st.columns(3)
+        with button_row_2[0]:
+            if st.button("♻️ 重置失败状态", width="stretch"):
+                result = reset_failed_sync()
+                st.success(result["message"])
+                st.rerun()
+        with button_row_2[1]:
+            if st.button("🔄 同步待同步流水", width="stretch"):
+                progress = st.progress(0, text="准备同步...")
+
+                def update_pending_progress(event):
+                    if event.get("event") == "progress":
+                        total = max(1, int(event["total"]))
+                        progress.progress(
+                            min(1.0, event["processed"] / total),
+                            text=(
+                                f"已处理 {event['processed']}/{event['total']}，"
+                                f"成功 {event['succeeded']}，"
+                                f"失败 {event['failed']}。"
+                            ),
+                        )
+
+                result = sync_pending_transactions(
+                    limit=100,
+                    progress_callback=update_pending_progress,
+                )
+                show_api_result(result)
+        with button_row_2[2]:
+            if st.button("🚀 全量同步", width="stretch"):
+                progress = st.progress(0, text="准备全量同步...")
+
+                def update_full_progress(event):
+                    if event.get("event") == "progress":
+                        total = max(1, int(event["total"]))
+                        progress.progress(
+                            min(1.0, event["processed"] / total),
+                            text=(
+                                f"已处理 {event['processed']}/{event['total']}，"
+                                f"成功 {event['succeeded']}，"
+                                f"失败 {event['failed']}。"
+                            ),
+                        )
+
+                result = full_sync(
+                    progress_callback=update_full_progress
+                )
+                show_api_result(result)
+        st.caption(
+            "SQLite 始终是主数据源；飞书失败只会记录同步错误，不影响本地账本。"
+        )
         st.markdown('</div>', unsafe_allow_html=True)
 
         st.markdown('<div class="css-card">', unsafe_allow_html=True)

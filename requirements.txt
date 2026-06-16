@@ -6,3 +6,4 @@ markdown
 openpyxl
 lark-oapi
 openai
+pytest

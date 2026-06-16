@@ -68,7 +68,7 @@ FEISHU_SYNC_RETRY_LIMIT=5
 DEEPSEEK_API_KEY=
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 DEEPSEEK_MODEL=deepseek-v4-flash
-AI_PARSER_ENABLED=false
+AI_PARSER_ENABLED=true
 AI_PARSER_REQUIRE_CONFIRMATION=true
 AI_PARSER_TIMEOUT_SECONDS=15
 AI_PARSER_FALLBACK_TO_LOCAL=true
@@ -106,7 +106,7 @@ AI_PARSER_FALLBACK_TO_LOCAL=true
 - `最近5笔`
 - `最近N笔`
 - `生成日报`
-- `同步看板`
+- `同步状态`
 - `撤销上一笔`
 - `删除 ID 12`
 - 普通记账文本，例如 `昨天打车36.5，晚饭42`
@@ -138,7 +138,25 @@ SQLite 是主数据源。飞书同步失败不会回滚本地账单，scheduler 
 
 ## 10. AI 解析与隐私
 
-- AI 解析默认关闭；打开 `AI_PARSER_ENABLED=true` 并配置密钥后才会调用兼容 OpenAI 的接口。
+- 仅当 `AI_PARSER_ENABLED=true` 且配置了密钥时，才会调用兼容 OpenAI 的 DeepSeek 接口。
+
+## DeepSeek 智能对话边界
+
+DeepSeek 只负责把用户消息解析为结构化 JSON，包括意图、交易草稿、追问、
+修订内容和查询参数。它不会获得 SQLite 连接，也不能直接新增、修改、删除流水
+或触发多维表格写入。
+
+本地 Python 负责：
+
+- 校验金额、日期、类型与分类；
+- 金额缺失时保存 10 分钟短期会话并继续追问；
+- 为新增、修改、删除生成 `pending_actions`；
+- 处理卡片确认以及“确认、可以、记上、取消、算了”等文本操作；
+- 执行 SQLite 写入并沿用原有多维表格同步；
+- AI 超时、JSON 错误或低置信度时回退本地规则。
+
+短期上下文保存在 `feishu_sessions`。身份只保存 SHA-256 哈希，会话只保留最近
+必要的交易草稿和意图摘要，默认 10 分钟过期。
 - AI 只返回结构化意图，不直接写数据库。
 - 低置信度、超时、接口错误或无密钥时自动降级到本地解析。
 - 审计日志只记录消息哈希、长度、意图和置信度，不记录消息正文、密钥或完整 `open_id`。

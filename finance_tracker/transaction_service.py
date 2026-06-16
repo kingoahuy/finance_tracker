@@ -1,3 +1,4 @@
+import calendar
 import datetime
 
 import pandas as pd
@@ -8,15 +9,18 @@ try:
         MONTHLY_BUDGET,
         add_transaction,
         claim_pending_action,
+        clear_feishu_session_pending,
         connect,
         create_pending_action,
         expire_pending_actions,
+        get_latest_pending_action,
         get_pending_action,
         init_db,
         load_transactions,
         normalize_transaction,
         parse_entry_text,
         resolve_pending_action,
+        update_pending_action_payload,
     )
 except ImportError:
     from email_service import generate_report_content
@@ -24,15 +28,18 @@ except ImportError:
         MONTHLY_BUDGET,
         add_transaction,
         claim_pending_action,
+        clear_feishu_session_pending,
         connect,
         create_pending_action,
         expire_pending_actions,
+        get_latest_pending_action,
         get_pending_action,
         init_db,
         load_transactions,
         normalize_transaction,
         parse_entry_text,
         resolve_pending_action,
+        update_pending_action_payload,
     )
 
 
@@ -43,7 +50,6 @@ MUTATING_INTENTS = {
     "update_last_transaction",
     "update_transaction_by_id",
 }
-
 
 def create_transactions_from_text(
     text,
@@ -73,17 +79,21 @@ def create_transactions(
     source_chat_id=None,
     auto_sync=True,
 ):
-    return [
+    saved_records = [
         create_transaction(
             record,
             source=source,
             source_message_id=source_message_id,
             source_user_open_id=source_user_open_id,
             source_chat_id=source_chat_id,
-            auto_sync=auto_sync,
+            auto_sync=False,
         )
         for record in records
     ]
+    if auto_sync:
+        for saved in saved_records:
+            _try_sync(saved["transaction_uid"])
+    return saved_records
 
 
 def create_transaction(
@@ -109,13 +119,20 @@ def get_today_summary(target_date=None):
     target_date = _as_date(target_date or datetime.date.today())
     df = _normalized_transactions()
     day_df = df[df["date"].dt.date == target_date] if not df.empty else df
+    expense = _sum_type(day_df, "支出")
+    daily_budget = MONTHLY_BUDGET / max(
+        1,
+        calendar.monthrange(target_date.year, target_date.month)[1],
+    )
     return {
         "date": target_date.isoformat(),
         "income": _sum_type(day_df, "收入"),
-        "expense": _sum_type(day_df, "支出"),
-        "balance": _sum_type(day_df, "收入") - _sum_type(day_df, "支出"),
+        "expense": expense,
+        "balance": _sum_type(day_df, "收入") - expense,
         "count": int(len(day_df)),
         "transactions": _records(day_df),
+        "daily_budget_reference": daily_budget,
+        "is_over_daily_budget": expense > daily_budget,
     }
 
 
@@ -169,6 +186,37 @@ def get_recent_transactions(limit=5, sender_open_id=None, chat_id=None):
     if chat_id:
         df = df[df["source_chat_id"] == chat_id]
     return _records(df.head(safe_limit))
+
+
+def get_category_summary(category, target_date=None):
+    target_date = _as_date(target_date or datetime.date.today())
+    df = _normalized_transactions()
+    if df.empty:
+        category_df = df
+        expense_df = df
+    else:
+        month_df = df[
+            (df["date"].dt.year == target_date.year)
+            & (df["date"].dt.month == target_date.month)
+            & (df["date"].dt.date <= target_date)
+        ]
+        expense_df = month_df[month_df["type"] == "支出"]
+        category_df = expense_df[expense_df["category"] == category]
+    amount = float(category_df["amount"].sum()) if not category_df.empty else 0.0
+    total_expense = (
+        float(expense_df["amount"].sum())
+        if not expense_df.empty
+        else 0.0
+    )
+    share = amount / total_expense * 100 if total_expense else 0.0
+    return {
+        "month": target_date.strftime("%Y-%m"),
+        "category": str(category),
+        "amount": amount,
+        "count": int(len(category_df)),
+        "share": share,
+        "is_high": bool(amount >= MONTHLY_BUDGET * 0.3 or share >= 40),
+    }
 
 
 def get_owned_transaction(sender_open_id, chat_id=None, transaction_id=None):
@@ -290,14 +338,112 @@ def queue_action(action, sender_open_id, chat_id, source_message_id=None):
     )
 
 
+def cleanup_expired_pending_actions():
+    return expire_pending_actions()
+
+
+def get_recent_pending_action(sender_open_id, chat_id):
+    cleanup_expired_pending_actions()
+    return get_latest_pending_action(sender_open_id, chat_id)
+
+
+def prepare_action(action, sender_open_id, chat_id):
+    prepared = dict(action or {})
+    intent = prepared.get("intent")
+    if intent in {
+        "delete_last_transaction",
+        "update_last_transaction",
+    }:
+        record = get_owned_transaction(sender_open_id, chat_id)
+        if record:
+            prepared["transaction_id"] = record["id"]
+            prepared["target_preview"] = _safe_record_preview(record)
+    elif intent in {
+        "delete_transaction_by_id",
+        "update_transaction_by_id",
+    }:
+        record = get_owned_transaction(
+            sender_open_id,
+            chat_id,
+            prepared.get("transaction_id"),
+        )
+        if record:
+            prepared["target_preview"] = _safe_record_preview(record)
+    return prepared
+
+
+def revise_pending_action(
+    action_id,
+    revision,
+    sender_open_id,
+    chat_id,
+):
+    action = get_pending_action(action_id)
+    if not action:
+        return {
+            "success": False,
+            "message": "没有可修改的待确认操作。",
+        }
+    if (
+        action["sender_open_id"] != str(sender_open_id)
+        or action["chat_id"] != str(chat_id)
+    ):
+        return {"success": False, "message": "你无权修改这个操作。"}
+    if action["status"] != "pending":
+        return {
+            "success": False,
+            "message": "该操作已处理，不能继续修改。",
+        }
+    payload = dict(action["payload"])
+    clean_revision = dict(revision or {})
+    if action["intent"] == "create_transactions":
+        rows = list(payload.get("transactions") or [])
+        if not rows:
+            return {"success": False, "message": "待确认记账内容为空。"}
+        rows[0] = normalize_transaction(
+            {**rows[0], **clean_revision}
+        )
+        if rows[0]["amount"] <= 0:
+            return {"success": False, "message": "金额必须大于 0。"}
+        payload["transactions"] = rows
+    elif action["intent"] in {
+        "update_last_transaction",
+        "update_transaction_by_id",
+    }:
+        payload["updates"] = {
+            **dict(payload.get("updates") or {}),
+            **clean_revision,
+        }
+    else:
+        return {
+            "success": False,
+            "message": "这个待确认操作不支持修改。",
+        }
+    if not update_pending_action_payload(action_id, payload):
+        return {"success": False, "message": "待确认操作已过期。"}
+    refreshed = get_pending_action(action_id)
+    return {
+        "success": True,
+        "message": "待确认内容已修改。",
+        "pending": refreshed,
+    }
+
+
 def resolve_action(action_id, operation, sender_open_id, chat_id):
-    expire_pending_actions()
+    cleanup_expired_pending_actions()
     action = get_pending_action(action_id)
     if not action:
         return {"success": False, "status": "missing", "message": "确认操作不存在。"}
     if action["sender_open_id"] != str(sender_open_id) or action["chat_id"] != str(chat_id):
         return {"success": False, "status": "forbidden", "message": "你无权处理这个操作。"}
     if action["status"] != "pending":
+        if action["status"] == "expired":
+            clear_feishu_session_pending(sender_open_id, chat_id)
+            return {
+                "success": False,
+                "status": "expired",
+                "message": "这条待确认操作已过期，请重新发送记账内容。",
+            }
         return {
             "success": action["status"] == "confirmed",
             "status": action["status"],
@@ -306,11 +452,18 @@ def resolve_action(action_id, operation, sender_open_id, chat_id):
         }
     if operation == "cancel":
         resolve_pending_action(action_id, "cancelled", {"cancelled": True})
+        clear_feishu_session_pending(sender_open_id, chat_id)
         return {"success": True, "status": "cancelled", "message": "已取消。"}
     if operation != "confirm":
         return {"success": False, "status": "invalid", "message": "无效的卡片操作。"}
     if not claim_pending_action(action_id):
         refreshed = get_pending_action(action_id)
+        if refreshed and refreshed["status"] == "expired":
+            return {
+                "success": False,
+                "status": "expired",
+                "message": "这条待确认操作已过期，请重新发送记账内容。",
+            }
         return {
             "success": False,
             "status": refreshed["status"] if refreshed else "missing",
@@ -326,6 +479,7 @@ def resolve_action(action_id, operation, sender_open_id, chat_id):
         )
         status = "confirmed" if result.get("success") else "failed"
         resolve_pending_action(action_id, status, result)
+        clear_feishu_session_pending(sender_open_id, chat_id)
         return {"status": status, **result}
     except Exception as exc:
         failure = {"success": False, "message": "执行失败，请稍后重试。", "error": type(exc).__name__}
@@ -342,7 +496,17 @@ def execute_mutating_action(intent, payload, sender_open_id, chat_id, source_mes
             source_user_open_id=sender_open_id,
             source_chat_id=chat_id,
         )
-        return {"success": bool(records), "transactions": records, "message": f"已记录 {len(records)} 笔流水。"}
+        today = get_today_summary()
+        month = get_month_summary()
+        return {
+            "success": bool(records),
+            "transactions": records,
+            "message": (
+                f"已记账 {len(records)} 笔。"
+                f"今日累计支出 ¥{today['expense']:.2f}，"
+                f"本月累计支出 ¥{month['expense']:.2f}。"
+            ),
+        }
     transaction_id = payload.get("transaction_id")
     if intent in {"delete_last_transaction", "delete_transaction_by_id"}:
         record = soft_delete_transaction(
@@ -418,10 +582,11 @@ def _try_sync(transaction_uid):
             return
     if not auto_sync_enabled():
         return
-    try:
-        sync_transaction(transaction_uid)
-    except Exception:
-        return
+    if transaction_uid:
+        try:
+            sync_transaction(transaction_uid)
+        except Exception:
+            pass
 
 
 def _normalized_transactions():
@@ -449,11 +614,22 @@ def _records(df):
     return result.to_dict(orient="records")
 
 
+def _safe_record_preview(record):
+    return {
+        "id": record.get("id"),
+        "date": record.get("date"),
+        "type": record.get("type"),
+        "category": record.get("category"),
+        "amount": float(record.get("amount") or 0),
+        "description": str(record.get("description") or "")[:80],
+    }
+
+
 def _resolved_message(status):
     return {
         "confirmed": "该操作已经确认过。",
         "cancelled": "该操作已经取消。",
-        "expired": "该操作已过期，请重新发起。",
+        "expired": "这条待确认操作已过期，请重新发送记账内容。",
         "failed": "该操作此前执行失败。",
         "processing": "该操作正在处理中。",
     }.get(status, "该操作已处理。")
