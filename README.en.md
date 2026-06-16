@@ -6,7 +6,6 @@
 
 **A local-first personal finance tracker** — record expenses from your phone, review reports on your computer, and keep your financial data under your control.
 
-智账 Pro 是一个本地优先的个人智能记账系统，支持飞书移动记账、Streamlit 可视化分析、SQLite 本地存储、AI 自然语言解析和自动日报。
 
 [![Python](https://img.shields.io/badge/Python-3.10+-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![Streamlit](https://img.shields.io/badge/Streamlit-Data%20App-FF4B4B?logo=streamlit&logoColor=white)](https://streamlit.io/)
