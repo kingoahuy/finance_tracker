@@ -6,7 +6,6 @@
 
 **本地优先的个人智能记账系统** — 手机发消息记账，电脑看报表分析，数据始终在你手里。
 
-A privacy-first, local SQLite-powered personal finance tracker with Feishu bot integration, AI-powered natural language parsing, and automated daily reports.
 
 [![Python](https://img.shields.io/badge/Python-3.10+-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![Streamlit](https://img.shields.io/badge/Streamlit-Data%20App-FF4B4B?logo=streamlit&logoColor=white)](https://streamlit.io/)
