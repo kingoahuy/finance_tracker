@@ -61,6 +61,7 @@
 | 单原始表管理 | Streamlit 设置页在一张表中管理基础字段并展示只读高级字段 |
 | 多维表格同步 | 自动同步原始流水、日期维度、净额、金额区间和标签等高级字段 |
 | 飞书快捷菜单 | 支持快捷查询、日报、同步及 DeepSeek 月度分析 |
+| 防重复回复 | 对消息和菜单事件按事件 ID 去重，避免飞书重投导致重复发送 |
 | 定时任务 | 后台调度日报、同步、服务管理等任务 |
 | 隐私保护 | `.env`、数据库、日志、导出文件和备份文件默认不提交 |
 
@@ -204,6 +205,7 @@ http://127.0.0.1:8501
 - **AI 失败回退**：DeepSeek 未配置或请求失败时，自动切换到本地规则或报告模板；
 - **数据单向同步**：以本地 SQLite 账本为主数据源；
 - **长连接接入**：飞书事件通过 WebSocket 接收，不需要公网回调地址。
+- **主动推送默认关闭**：机器人只响应用户消息、菜单或卡片操作；定时飞书日报必须显式启用。
 
 详细文档：
 
@@ -368,4 +370,5 @@ git status --ignored
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+This project is licensed under the [MIT License](LICENSE). You may use,
+study, modify, and redistribute the code while retaining the license notice.

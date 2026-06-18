@@ -1,8 +1,10 @@
 import unittest
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from finance_tracker import feishu_bot, feishu_menu_dispatcher
+from finance_tracker import feishu_bot, feishu_menu_dispatcher, ledger
 from finance_tracker.feishu_config import FeishuConfig
 
 
@@ -78,6 +80,16 @@ def menu_config():
 
 
 class FeishuMenuDispatcherTest(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.original_db = ledger.DB_FILE
+        ledger.DB_FILE = Path(self.temp_dir.name) / "menu-test.db"
+        ledger.init_db()
+
+    def tearDown(self):
+        ledger.DB_FILE = self.original_db
+        self.temp_dir.cleanup()
+
     def test_all_required_menu_keys_use_mapping_dispatch(self):
         self.assertEqual(
             set(feishu_menu_dispatcher.MENU_HANDLERS),
@@ -246,6 +258,29 @@ class FeishuMenuDispatcherTest(unittest.TestCase):
                 }
             ],
         )
+
+    @mock.patch.object(
+        feishu_bot,
+        "handle_menu_event",
+        return_value="菜单回复",
+    )
+    def test_duplicate_menu_event_does_not_send_twice(self, dispatcher):
+        client = FakeMenuClient()
+        event = menu_event()
+        first = feishu_bot.handle_menu_event_callback(
+            event,
+            api_client=client,
+            config=menu_config(),
+        )
+        second = feishu_bot.handle_menu_event_callback(
+            event,
+            api_client=client,
+            config=menu_config(),
+        )
+        self.assertTrue(first["success"])
+        self.assertEqual(len(client.messages), 1)
+        self.assertTrue(second.get("menu_event"))
+        dispatcher.assert_called_once_with("today_bill", "open-1")
 
     def test_unapproved_menu_user_is_rejected(self):
         client = FakeMenuClient()

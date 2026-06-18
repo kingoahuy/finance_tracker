@@ -684,6 +684,7 @@ def _build_client(config):
     return OpenAI(
         api_key=config["api_key"],
         base_url=config["base_url"],
+        max_retries=0,
     )
 
 

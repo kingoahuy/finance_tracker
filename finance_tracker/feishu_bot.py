@@ -69,7 +69,14 @@ def handle_message_event(data, api_client=None, config=None):
     event_id = str(getattr(data.header, "event_id", "") or message_id)
     chat_id = str(message.chat_id or "")
     chat_type = str(message.chat_type or "")
+    sender_type = str(getattr(sender, "sender_type", "") or "").lower()
     sender_open_id = str(getattr(sender.sender_id, "open_id", "") or "")
+
+    # Only human users may trigger replies. This prevents messages emitted by
+    # the bot/application itself from being fed back into the command router.
+    if sender_type and sender_type != "user":
+        LOGGER.warning("Ignored non-user Feishu message sender_type=%s.", sender_type)
+        return None
 
     if config.bootstrap_mode:
         LOGGER.warning(
@@ -235,6 +242,7 @@ def handle_menu_event_callback(data, api_client=None, config=None):
         return None
 
     event_key = str(_nested_value(data, "event", "event_key") or "").strip()
+    event_id = str(_nested_value(data, "header", "event_id") or "").strip()
     sender_open_id = str(
         _nested_value(data, "event", "operator", "operator_id", "open_id")
         or ""
@@ -250,6 +258,22 @@ def handle_menu_event_callback(data, api_client=None, config=None):
     if not sender_open_id or sender_open_id not in config.allowed_open_ids:
         LOGGER.warning("Rejected menu event from an unapproved Feishu user.")
         return None
+    if not event_id:
+        LOGGER.warning("Ignored Feishu menu event without event_id.")
+        return None
+
+    duplicate = _begin_event(
+        event_id,
+        f"menu:{event_id}",
+        sender_open_id,
+    )
+    if duplicate:
+        LOGGER.info(
+            "Ignored duplicate Feishu menu event event_id=%s event_key=%s.",
+            event_id,
+            event_key or "unknown",
+        )
+        return duplicate
 
     reply_text = handle_menu_event(event_key, sender_open_id)
     try:
@@ -275,6 +299,7 @@ def handle_menu_event_callback(data, api_client=None, config=None):
                 config=config,
             )
     except Exception as exc:
+        _finish_event(event_id, "failed", {"error": type(exc).__name__})
         LOGGER.exception(
             "Feishu menu response failed event_key=%s error=%s",
             event_key or "unknown",
@@ -282,6 +307,16 @@ def handle_menu_event_callback(data, api_client=None, config=None):
         )
         return None
 
+    _finish_event(
+        event_id,
+        "success" if response.get("success") else "failed",
+        {
+            "menu_event": True,
+            "event_key": event_key,
+            "success": bool(response.get("success")),
+            "code": int(response.get("code", -1) or -1),
+        },
+    )
     LOGGER.info(
         "Processed Feishu menu event event_key=%s success=%s code=%s "
         "message=%s log_id=%s",

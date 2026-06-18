@@ -80,6 +80,12 @@ class FeishuConfigTest(unittest.TestCase):
         self.assertTrue(status["bitable_table_id_configured"])
         self.assertFalse(status["bitable_auto_sync"])
 
+    def test_proactive_daily_report_is_disabled_by_default(self):
+        path = self._env_file("")
+        with mock.patch.dict(os.environ, {}, clear=True):
+            config = get_feishu_config(env_path=path)
+        self.assertFalse(config.daily_report_enabled)
+
 
 if __name__ == "__main__":
     unittest.main()
