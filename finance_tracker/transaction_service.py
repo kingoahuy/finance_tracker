@@ -1,9 +1,11 @@
 import calendar
 import datetime
+import threading
 
 import pandas as pd
 
 try:
+    from .derived_fields import DERIVED_COLUMNS, derived_values
     from .email_service import generate_report_content
     from .ledger import (
         MONTHLY_BUDGET,
@@ -23,6 +25,7 @@ try:
         update_pending_action_payload,
     )
 except ImportError:
+    from derived_fields import DERIVED_COLUMNS, derived_values
     from email_service import generate_report_content
     from ledger import (
         MONTHLY_BUDGET,
@@ -40,7 +43,12 @@ except ImportError:
         parse_entry_text,
         resolve_pending_action,
         update_pending_action_payload,
-    )
+)
+
+
+DERIVED_UPDATE_SQL = ", ".join(f"{column} = ?" for column in DERIVED_COLUMNS)
+_PENDING_SYNC_LOCK = threading.Lock()
+_PENDING_SYNC_THREAD = None
 
 
 MUTATING_INTENTS = {
@@ -265,22 +273,30 @@ def soft_delete_transaction(
     record = get_owned_transaction(sender_open_id, chat_id, transaction_id)
     if not record:
         return None
+    deleted_derived = derived_values({**record, "status": "deleted"})
     with connect() as conn:
         cursor = conn.execute(
-            """
+            f"""
             UPDATE transactions
             SET status = 'deleted', deleted_at = CURRENT_TIMESTAMP,
                 deleted_by_open_id = ?, delete_reason = ?,
                 updated_at = CURRENT_TIMESTAMP, sync_status = 'pending',
-                sync_error = ''
+                sync_error = '',
+                {DERIVED_UPDATE_SQL}
             WHERE rowid = ? AND status = 'active'
             """,
-            (str(sender_open_id), str(reason)[:200], record["_rowid"]),
+            (
+                str(sender_open_id),
+                str(reason)[:200],
+                *deleted_derived,
+                record["_rowid"],
+            ),
         )
         if cursor.rowcount != 1:
             return None
         _enqueue_update(conn, record["transaction_uid"])
     record["status"] = "deleted"
+    record.update(dict(zip(DERIVED_COLUMNS, deleted_derived)))
     if auto_sync:
         _try_sync(record["transaction_uid"])
     return record
@@ -298,27 +314,35 @@ def update_owned_transaction(
         return None
     merged = {**record, **dict(updates or {})}
     normalized = normalize_transaction(merged)
+    updated_derived = derived_values({**normalized, "status": "active"})
     with connect() as conn:
         cursor = conn.execute(
-            """
+            f"""
             UPDATE transactions
             SET date = ?, type = ?, category = ?, amount = ?, description = ?,
                 tags = ?, is_need = ?, is_fixed = ?, updated_at = CURRENT_TIMESTAMP,
-                sync_status = 'pending', sync_error = ''
+                sync_status = 'pending', sync_error = '',
+                {DERIVED_UPDATE_SQL}
             WHERE rowid = ? AND status = 'active'
               AND source = 'feishu' AND source_user_open_id = ?
             """,
             (
                 normalized["date"], normalized["type"], normalized["category"],
                 normalized["amount"], normalized["description"], normalized["tags"],
-                normalized["is_need"], normalized["is_fixed"], record["_rowid"],
+                normalized["is_need"], normalized["is_fixed"],
+                *updated_derived,
+                record["_rowid"],
                 str(sender_open_id),
             ),
         )
         if cursor.rowcount != 1:
             return None
         _enqueue_update(conn, record["transaction_uid"])
-    updated = {**record, **normalized}
+    updated = {
+        **record,
+        **normalized,
+        **dict(zip(DERIVED_COLUMNS, updated_derived)),
+    }
     if auto_sync:
         _try_sync(record["transaction_uid"])
     return updated
@@ -587,6 +611,37 @@ def _try_sync(transaction_uid):
             sync_transaction(transaction_uid)
         except Exception:
             pass
+
+
+def schedule_pending_sync():
+    """Sync editor-created outbox work without blocking the Streamlit page."""
+    global _PENDING_SYNC_THREAD
+    with _PENDING_SYNC_LOCK:
+        if _PENDING_SYNC_THREAD and _PENDING_SYNC_THREAD.is_alive():
+            return False
+        _PENDING_SYNC_THREAD = threading.Thread(
+            target=_sync_pending_worker,
+            name="finance-bitable-sync",
+            daemon=True,
+        )
+        _PENDING_SYNC_THREAD.start()
+    return True
+
+
+def _sync_pending_worker():
+    try:
+        from .bitable_sync import auto_sync_enabled, sync_pending_transactions
+    except ImportError:
+        try:
+            from bitable_sync import auto_sync_enabled, sync_pending_transactions
+        except ImportError:
+            return
+    if not auto_sync_enabled():
+        return
+    try:
+        sync_pending_transactions(limit=100)
+    except Exception:
+        pass
 
 
 def _normalized_transactions():

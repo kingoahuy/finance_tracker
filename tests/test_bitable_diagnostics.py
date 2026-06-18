@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from finance_tracker import bitable_sync, ledger, transaction_service
+from finance_tracker.derived_fields import DERIVED_COLUMNS, DERIVED_FIELD_LABELS
 
 
 def fake_config(**overrides):
@@ -66,6 +67,7 @@ class FakeTableService:
             {"name": "月度汇总表", "table_id": "tbl-summary"},
         ]
         self.deleted = []
+        self.created_fields = []
 
     def list_tables(self):
         return {
@@ -112,6 +114,22 @@ class FakeTableService:
             "table_id": table_id,
         }
 
+    def create_field(self, field_name, field_type, table_id=None):
+        self.created_fields.append(
+            {
+                "field_name": field_name,
+                "field_type": field_type,
+                "table_id": table_id,
+            }
+        )
+        return {
+            "success": True,
+            "code": 0,
+            "message": "success",
+            "log_id": f"log-create-{field_name}",
+            "field_name": field_name,
+        }
+
 
 def remote_record(record_id, uid="", local_id=0, description="", created=0):
     return {
@@ -126,6 +144,41 @@ def remote_record(record_id, uid="", local_id=0, description="", created=0):
     }
 
 
+def required_field_defs(names=None):
+    names = list(names or bitable_sync.REQUIRED_FIELDS)
+    base_types = {
+        bitable_sync.FIELD_MAP["transaction_uid"]: (1, "Text"),
+        bitable_sync.FIELD_MAP["id"]: (2, "Number"),
+        bitable_sync.FIELD_MAP["date"]: (5, "DateTime"),
+        bitable_sync.FIELD_MAP["type"]: (3, "SingleSelect"),
+        bitable_sync.FIELD_MAP["category"]: (3, "SingleSelect"),
+        bitable_sync.FIELD_MAP["amount"]: (2, "Number"),
+        bitable_sync.FIELD_MAP["description"]: (1, "Text"),
+        bitable_sync.FIELD_MAP["tags"]: (4, "MultiSelect"),
+        bitable_sync.FIELD_MAP["is_need"]: (7, "Checkbox"),
+        bitable_sync.FIELD_MAP["is_fixed"]: (7, "Checkbox"),
+        bitable_sync.FIELD_MAP["source"]: (3, "SingleSelect"),
+        bitable_sync.FIELD_MAP["source_message_id"]: (1, "Text"),
+        bitable_sync.FIELD_MAP["created_at"]: (5, "DateTime"),
+        bitable_sync.FIELD_MAP["updated_at"]: (5, "DateTime"),
+        bitable_sync.FIELD_MAP["status"]: (3, "SingleSelect"),
+        bitable_sync.FIELD_MAP["deleted_at"]: (5, "DateTime"),
+        bitable_sync.FIELD_MAP["deleted_by_open_id"]: (1, "Text"),
+        bitable_sync.FIELD_MAP["delete_reason"]: (1, "Text"),
+    }
+    derived_ui = {1: "Text", 2: "Number", 7: "Checkbox"}
+    for label, field_type in bitable_sync.DERIVED_BITABLE_TYPES.items():
+        base_types[label] = (field_type, derived_ui[field_type])
+    return [
+        {
+            "field_name": name,
+            "type": base_types.get(name, (1, "Text"))[0],
+            "ui_type": base_types.get(name, (1, "Text"))[1],
+        }
+        for name in names
+    ]
+
+
 class BitableDiagnosticsTest(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -138,10 +191,7 @@ class BitableDiagnosticsTest(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def test_validate_fields_reports_exact_missing_names(self):
-        present = [
-            {"field_name": name}
-            for name in bitable_sync.REQUIRED_FIELDS[:-2]
-        ]
+        present = required_field_defs(bitable_sync.REQUIRED_FIELDS[:-2])
         service = FakeFieldService(
             {
                 "success": True,
@@ -160,14 +210,11 @@ class BitableDiagnosticsTest(unittest.TestCase):
         self.assertIn(bitable_sync.REQUIRED_FIELDS[-1], result["message"])
 
     def test_validate_fields_requires_tags_to_be_multi_select(self):
-        fields = [
-            {
-                "field_name": name,
-                "type": 1 if name == bitable_sync.FIELD_MAP["tags"] else None,
-                "ui_type": "Text" if name == bitable_sync.FIELD_MAP["tags"] else "",
-            }
-            for name in bitable_sync.REQUIRED_FIELDS
-        ]
+        fields = required_field_defs()
+        for field in fields:
+            if field["field_name"] == bitable_sync.FIELD_MAP["tags"]:
+                field["type"] = 1
+                field["ui_type"] = "Text"
         service = FakeFieldService(
             {
                 "success": True,
@@ -591,6 +638,28 @@ class BitableDiagnosticsTest(unittest.TestCase):
         self.assertEqual(original["field_count"], 2)
         self.assertEqual(original["record_count"], 1)
 
+    def test_field_map_contains_derived_fields(self):
+        for key, label in DERIVED_FIELD_LABELS.items():
+            self.assertIn(key, bitable_sync.FIELD_MAP)
+            self.assertEqual(bitable_sync.FIELD_MAP[key], label)
+            self.assertIn(label, bitable_sync.REQUIRED_FIELDS)
+
+    def test_ensure_main_table_fields_only_creates_missing_fields(self):
+        service = FakeTableService()
+        result = bitable_sync.ensure_main_table_fields(service=service)
+        self.assertTrue(result["success"])
+        self.assertEqual(result["table_id"], "tbl-original")
+        self.assertEqual(result["created_count"], len(DERIVED_FIELD_LABELS))
+        self.assertEqual(result["created_summary_tables"], 0)
+        self.assertEqual(service.deleted, [])
+        self.assertEqual(
+            {item["field_name"] for item in service.created_fields},
+            set(DERIVED_FIELD_LABELS.values()),
+        )
+        self.assertTrue(
+            all(item["table_id"] == "tbl-original" for item in service.created_fields)
+        )
+
     def test_cleanup_summary_tables_dry_run_is_nondestructive(self):
         service = FakeTableService()
         result = bitable_sync.cleanup_summary_tables(
@@ -640,6 +709,137 @@ class BitableDiagnosticsTest(unittest.TestCase):
         self.assertNotIn("tbl-original", service.deleted)
         self.assertTrue(result["original_table_protected"])
 
+    def test_backfill_derived_fields_dry_run_is_nondestructive(self):
+        record = transaction_service.create_transaction(
+            {
+                "date": "2026-06-14",
+                "type": "支出",
+                "category": "餐饮",
+                "amount": 10.4,
+                "description": "午饭",
+                "tags": "食堂",
+            },
+            auto_sync=False,
+        )
+        with ledger.connect() as conn:
+            conn.execute(
+                f"""
+                UPDATE transactions
+                SET {", ".join(f"{column} = NULL" for column in DERIVED_COLUMNS)},
+                    sync_status = 'synced'
+                WHERE transaction_uid = ?
+                """,
+                (record["transaction_uid"],),
+            )
+        result = bitable_sync.backfill_derived_fields(apply=False)
+        self.assertEqual(result["planned_update_count"], 1)
+        self.assertEqual(result["updated_count"], 0)
+        with ledger.connect() as conn:
+            net_amount, sync_status = conn.execute(
+                """
+                SELECT net_amount, sync_status FROM transactions
+                WHERE transaction_uid = ?
+                """,
+                (record["transaction_uid"],),
+            ).fetchone()
+        self.assertIsNone(net_amount)
+        self.assertEqual(sync_status, "synced")
+
+    def test_backfill_derived_fields_apply_updates_sqlite_and_pending(self):
+        record = transaction_service.create_transaction(
+            {
+                "date": "2026-06-14",
+                "type": "收入",
+                "category": "工资",
+                "amount": 20000,
+                "description": "工资",
+                "tags": "工资",
+            },
+            auto_sync=False,
+        )
+        with ledger.connect() as conn:
+            conn.execute(
+                f"""
+                UPDATE transactions
+                SET {", ".join(f"{column} = NULL" for column in DERIVED_COLUMNS)},
+                    sync_status = 'synced'
+                WHERE transaction_uid = ?
+                """,
+                (record["transaction_uid"],),
+            )
+        result = bitable_sync.backfill_derived_fields(apply=True)
+        self.assertEqual(result["planned_update_count"], 1)
+        self.assertEqual(result["updated_count"], 1)
+        with ledger.connect() as conn:
+            net_amount, ledger_month, sync_status = conn.execute(
+                """
+                SELECT net_amount, ledger_month, sync_status FROM transactions
+                WHERE transaction_uid = ?
+                """,
+                (record["transaction_uid"],),
+            ).fetchone()
+            outbox_count = conn.execute(
+                """
+                SELECT COUNT(*) FROM sync_outbox
+                WHERE transaction_uid = ? AND operation = 'update'
+                """,
+                (record["transaction_uid"],),
+            ).fetchone()[0]
+        self.assertEqual(net_amount, 20000)
+        self.assertEqual(ledger_month, "2026-06")
+        self.assertEqual(sync_status, "pending")
+        self.assertGreaterEqual(outbox_count, 1)
+
+    def test_audit_derived_fields_reports_local_and_remote_field_status(self):
+        record = transaction_service.create_transaction(
+            {
+                "date": "2026-06-14",
+                "type": "支出",
+                "category": "餐饮",
+                "amount": 10.4,
+                "description": "private description",
+                "tags": "早餐",
+            },
+            auto_sync=False,
+        )
+        with ledger.connect() as conn:
+            conn.execute(
+                f"""
+                UPDATE transactions
+                SET {", ".join(f"{column} = NULL" for column in DERIVED_COLUMNS)}
+                WHERE transaction_uid = ?
+                """,
+                (record["transaction_uid"],),
+            )
+        service = FakeFieldService(
+            {
+                "success": True,
+                "code": 0,
+                "message": "",
+                "log_id": "log-fields",
+                "fields": required_field_defs(),
+            }
+        )
+        result = bitable_sync.audit_derived_fields(service=service)
+        self.assertTrue(result["success"])
+        self.assertEqual(result["local_transactions_total"], 1)
+        self.assertEqual(result["active_missing_derived_count"], 1)
+        self.assertFalse(result["recent_records"][0]["derived_complete"])
+        self.assertIn(
+            "date_year",
+            result["recent_records"][0]["missing_fields"],
+        )
+        self.assertTrue(
+            result["feishu_original_table_fields"][
+                "all_derived_fields_present"
+            ]
+        )
+        self.assertEqual(
+            set(result["feishu_original_table_fields"]["existing_derived_fields"]),
+            set(DERIVED_FIELD_LABELS.values()),
+        )
+        self.assertNotIn("private description", str(result))
+
     def test_sync_one_returns_only_safe_identity_fields(self):
         record = transaction_service.create_transaction(
             {
@@ -657,10 +857,7 @@ class BitableDiagnosticsTest(unittest.TestCase):
                 "code": 0,
                 "message": "",
                 "log_id": "log-fields",
-                "fields": [
-                    {"field_name": name}
-                    for name in bitable_sync.REQUIRED_FIELDS
-                ],
+                "fields": required_field_defs(),
             }
         )
         service.search_record = mock.Mock(
@@ -696,6 +893,13 @@ class BitableDiagnosticsTest(unittest.TestCase):
         )
         self.assertFalse(result["steps"][0]["record_id_found"])
         self.assertNotIn("record_id", result["steps"][0])
+        create_payload = service.create_record.call_args.args[0]
+        for column in DERIVED_COLUMNS:
+            self.assertIn(column, create_payload)
+            self.assertIsNotNone(create_payload[column], column)
+        self.assertEqual(create_payload["expense_amount"], 25.0)
+        self.assertEqual(create_payload["net_amount"], -25.0)
+        self.assertEqual(create_payload["is_expense"], 1)
 
     def test_sync_one_traces_update_when_record_exists(self):
         record = transaction_service.create_transaction(
@@ -714,10 +918,7 @@ class BitableDiagnosticsTest(unittest.TestCase):
                 "code": 0,
                 "message": "",
                 "log_id": "log-fields",
-                "fields": [
-                    {"field_name": name}
-                    for name in bitable_sync.REQUIRED_FIELDS
-                ],
+                "fields": required_field_defs(),
             }
         )
         service.search_record = mock.Mock(
@@ -747,6 +948,13 @@ class BitableDiagnosticsTest(unittest.TestCase):
         )
         self.assertTrue(result["steps"][0]["record_id_found"])
         self.assertNotIn("rec-private", str(result))
+        update_payload = service.update_record.call_args.args[1]
+        for column in DERIVED_COLUMNS:
+            self.assertIn(column, update_payload)
+            self.assertIsNotNone(update_payload[column], column)
+        self.assertEqual(update_payload["expense_amount"], 4.0)
+        self.assertEqual(update_payload["net_amount"], -4.0)
+        self.assertEqual(update_payload["is_expense"], 1)
 
     def test_timeout_is_bounded(self):
         with mock.patch.dict(

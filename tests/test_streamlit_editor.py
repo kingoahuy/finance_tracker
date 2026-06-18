@@ -48,9 +48,11 @@ class StreamlitEditorTest(unittest.TestCase):
         all_rows = ledger.load_transactions(include_deleted=True)
         self.assertEqual(len(active), 1)
         self.assertEqual(float(active.iloc[0]["amount"]), 30)
+        self.assertEqual(float(active.iloc[0]["net_amount"]), -30)
         deleted = all_rows[all_rows["status"] == "deleted"]
         self.assertEqual(len(deleted), 1)
         self.assertEqual(deleted.iloc[0]["description"], "地铁")
+        self.assertEqual(int(deleted.iloc[0]["is_active"]), 0)
 
     def test_unchanged_rows_are_not_enqueued_again(self):
         original = ledger.load_transactions()

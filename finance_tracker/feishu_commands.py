@@ -10,8 +10,23 @@ try:
         get_finance_overview,
         get_tag_summary,
     )
-    from .feishu_report import build_daily_report_card, build_daily_report_text
+    from .deepseek_reports import (
+        call_deepseek_report,
+        fallback_daily_report_markdown,
+        fallback_monthly_bill_markdown,
+        fallback_monthly_consumption_report_markdown,
+        fallback_monthly_tag_analysis_markdown,
+    )
     from .ledger import get_feishu_session, save_feishu_session
+    from .reporting import (
+        build_daily_report_payload,
+        build_monthly_bill_payload,
+        build_monthly_consumption_report_payload,
+        build_monthly_tag_analysis_payload,
+        generate_daily_report,
+        generate_monthly_report,
+        generate_yearly_report,
+    )
     from .transaction_service import (
         get_category_summary,
         get_recent_pending_action,
@@ -32,8 +47,23 @@ except ImportError:
         get_finance_overview,
         get_tag_summary,
     )
-    from feishu_report import build_daily_report_card, build_daily_report_text
+    from deepseek_reports import (
+        call_deepseek_report,
+        fallback_daily_report_markdown,
+        fallback_monthly_bill_markdown,
+        fallback_monthly_consumption_report_markdown,
+        fallback_monthly_tag_analysis_markdown,
+    )
     from ledger import get_feishu_session, save_feishu_session
+    from reporting import (
+        build_daily_report_payload,
+        build_monthly_bill_payload,
+        build_monthly_consumption_report_payload,
+        build_monthly_tag_analysis_payload,
+        generate_daily_report,
+        generate_monthly_report,
+        generate_yearly_report,
+    )
     from transaction_service import (
         get_category_summary,
         get_recent_pending_action,
@@ -47,25 +77,76 @@ except ImportError:
     )
 
 
-HELP_TEXT = """智账 Pro 飞书记账
+PROMPT_GROUPS = (
+    (
+        "快速记账",
+        (
+            "午饭 28",
+            "今天下午在食堂吃饭花了10.4元",
+            "昨天打车 36.5",
+            "收到工资 20000",
+            "报销到账 300",
+        ),
+    ),
+    (
+        "修改与删除",
+        (
+            "删除上一笔",
+            "撤销上一笔",
+            "修改上一笔金额为 32",
+            "上一笔分类改成交通",
+            "上一笔描述改成和朋友吃饭",
+            "删除 ID 12",
+        ),
+    ),
+    (
+        "查账",
+        (
+            "今日账单",
+            "本月账单",
+            "本月账单简版",
+            "最近5笔",
+            "最近10笔",
+            "餐饮这个月花了多少",
+            "今天花了多少钱",
+            "这个月收入多少",
+            "这个月支出多少",
+        ),
+    ),
+    (
+        "报告",
+        (
+            "记账日报",
+            "生成今日日报",
+            "生成昨天日报",
+            "生成 2026-06-14 日报",
+            "本月标签分析",
+            "本月消费报告",
+            "生成本月月报",
+            "生成 2026-06 月报",
+            "生成今年年报",
+            "生成 2026 年报",
+        ),
+    ),
+    (
+        "同步",
+        (
+            "同步数据",
+            "同步状态",
+            "检查同步",
+            "同步到飞书多维表格",
+        ),
+    ),
+)
 
-可用命令：
-- 今日账单
-- 本月账单
-- 最近5笔 / 最近N笔
-- 生成日报
-- 同步状态
-- 本月财务分析 / 本月消费报告
-- 这个月哪些地方花得最多
-- 本月预算情况
-- 本月标签分析
-- 撤销上一笔
-- 删除 ID 12
 
-也可以直接发送自然语言：
-午饭25
-昨天打车36.5，晚饭42
-把上一笔金额改成30"""
+HELP_TEXT = "\n\n".join(
+    [f"智账 Pro 飞书记账提示词库"]
+    + [
+        f"【{title}】\n" + "\n".join(f"- {example}" for example in examples)
+        for title, examples in PROMPT_GROUPS
+    ]
+)
 
 
 def route_command(
@@ -112,21 +193,67 @@ def route_command(
     )
 
 
+def prompt_library_card():
+    elements = []
+    for title, examples in PROMPT_GROUPS:
+        elements.append(
+            {
+                "tag": "markdown",
+                "content": (
+                    f"**{title}**\n"
+                    + "\n".join(f"- `{example}`" for example in examples)
+                ),
+            }
+        )
+    return {
+        "schema": "2.0",
+        "config": {"wide_screen_mode": False},
+        "header": {
+            "template": "blue",
+            "title": {
+                "tag": "plain_text",
+                "content": "智账 Pro 提示词库",
+            },
+        },
+        "body": {"elements": elements},
+    }
+
+
 def _route_explicit(
     text,
     context,
     sync_callback,
     sync_dashboard_callback,
 ):
-    if text in {"帮助", "help", "/help"}:
-        return {"success": True, "text": HELP_TEXT, "action": "help"}
+    if text in {"帮助", "你能做什么", "提示词", "记账帮助", "使用说明", "help", "/help"}:
+        return {
+            "success": True,
+            "text": HELP_TEXT,
+            "card": prompt_library_card(),
+            "action": "help",
+        }
+    if (
+        any(phrase in text for phrase in ("同步财务看板", "更新财务看板", "飞书财务看板同步"))
+        or (any(phrase in text for phrase in ("财务看板", "汇总表")) and "同步" in text)
+    ):
+        return {
+            "success": False,
+            "text": "财务看板/汇总表同步已停用。现在只支持“同步数据”到原始明细数据表，或发送“同步状态”查看状态。",
+            "action": "invalid",
+        }
+    report_result = _route_report_command(text)
+    if report_result:
+        return report_result
     if text == "今日账单":
         return {"success": True, "text": _format_today(get_today_summary()), "action": "today"}
-    if text == "本月账单":
+    if text == "本月账单简版":
+        return {"success": True, "text": _format_month(get_month_summary()), "action": "month"}
+    if text in {"今天花了多少钱", "今日花了多少钱"}:
+        return {"success": True, "text": _format_today(get_today_summary()), "action": "today"}
+    if text in {"这个月支出了多少", "这个月支出多少", "本月支出多少", "本月收入多少"}:
         return {"success": True, "text": _format_month(get_month_summary()), "action": "month"}
     if text in {
         "本月财务分析",
-        "本月消费报告",
         "看看我的消费结构",
     }:
         return _run_finance_analysis("overview")
@@ -134,7 +261,7 @@ def _route_explicit(
         return _run_finance_analysis("category")
     if text == "本月预算情况":
         return _run_finance_analysis("budget")
-    if text == "本月标签分析":
+    if text == "本月标签分析简版":
         return _run_finance_analysis("tag")
     recent_match = re.fullmatch(r"最近\s*(\d+)\s*笔", text)
     if recent_match:
@@ -150,16 +277,22 @@ def _route_explicit(
             "card": recent_transactions_card(records, limit),
             "action": "recent",
         }
-    if text == "生成日报":
+    category_query = re.fullmatch(
+        r"([\u4e00-\u9fff]{2,4})(?:这个月|本月)?(?:花了多少|支出多少|消费多少)",
+        text,
+    )
+    if category_query:
+        summary = get_category_summary(category_query.group(1))
         return {
             "success": True,
-            "text": build_daily_report_text(),
-            "card": build_daily_report_card(),
-            "action": "report",
+            "text": _format_category(summary),
+            "action": "category",
         }
-    if text in {"同步状态", "同步数据"}:
+    if text in {"同步状态", "检查同步"}:
+        return _run_sync_status(sync_dashboard_callback)
+    if text in {"同步数据", "同步到飞书多维表格"}:
         return _run_sync(sync_callback, sync_dashboard_callback)
-    if text == "撤销上一笔":
+    if text in {"撤销上一笔", "删除上一笔"}:
         return _queue_confirmation(
             {
                 "intent": "delete_last_transaction",
@@ -184,6 +317,134 @@ def _route_explicit(
             },
             context,
         )
+    return None
+
+
+def _route_report_command(text):
+    compact = re.sub(r"\s+", "", text)
+    if compact in {
+        "本月账单",
+        "这个月账单",
+        "本月收支",
+        "这个月花了多少",
+        "这个月收入多少",
+    }:
+        return _run_deepseek_report(
+            "monthly_bill_report",
+            "monthly_bill",
+            build_monthly_bill_payload,
+            fallback_monthly_bill_markdown,
+        )
+
+    daily_date = _parse_daily_report_date(compact)
+    if daily_date is not None:
+        return _run_deepseek_report(
+            "daily_report",
+            "daily_report",
+            lambda: build_daily_report_payload(daily_date),
+            fallback_daily_report_markdown,
+        )
+
+    if compact in {
+        "本月标签分析",
+        "这个月标签分析",
+        "看看我的消费标签",
+        "本月消费场景",
+        "这个月钱花在哪些场景",
+    }:
+        return _run_deepseek_report(
+            "monthly_tag_analysis",
+            "monthly_tag_analysis",
+            build_monthly_tag_analysis_payload,
+            fallback_monthly_tag_analysis_markdown,
+        )
+
+    if compact in {
+        "本月消费报告",
+        "生成本月消费报告",
+        "本月财务分析",
+        "看看这个月消费情况",
+        "这个月消费怎么样",
+    }:
+        return _run_deepseek_report(
+            "monthly_consumption_report",
+            "monthly_consumption_report",
+            build_monthly_consumption_report_payload,
+            fallback_monthly_consumption_report_markdown,
+        )
+
+    daily_match = re.fullmatch(
+        r"生成(?:(今天|今日|昨天|昨日)|(\d{4}-\d{1,2}-\d{1,2}))?日报",
+        compact,
+    )
+    if daily_match:
+        if daily_match.group(2):
+            target = daily_match.group(2)
+        elif daily_match.group(1) in {"昨天", "昨日"}:
+            target = datetime.date.today() - datetime.timedelta(days=1)
+        else:
+            target = datetime.date.today()
+        return _run_deepseek_report(
+            "daily_report",
+            "daily_report",
+            lambda: build_daily_report_payload(target),
+            fallback_daily_report_markdown,
+        )
+
+    monthly_match = re.fullmatch(
+        r"生成(?:(本月)|(\d{4}-\d{1,2}))月报",
+        compact,
+    )
+    if monthly_match:
+        target_month = monthly_match.group(2) or None
+        return {
+            "success": True,
+            "text": generate_monthly_report(target_month),
+            "action": "monthly_report",
+        }
+
+    yearly_match = re.fullmatch(
+        r"生成(?:(今年)|(\d{4}))年报",
+        compact,
+    )
+    if yearly_match:
+        target_year = yearly_match.group(2) or None
+        return {
+            "success": True,
+            "text": generate_yearly_report(target_year),
+            "action": "yearly_report",
+        }
+    return None
+
+
+def _run_deepseek_report(action_name, prompt_name, payload_builder, fallback_builder):
+    data_payload = payload_builder()
+    try:
+        markdown = call_deepseek_report(prompt_name, data_payload)
+    except Exception:
+        markdown = fallback_builder(data_payload)
+    return {
+        "success": True,
+        "text": markdown,
+        "action": action_name,
+    }
+
+
+def _parse_daily_report_date(compact):
+    if compact in {"记账日报", "生成今日日报", "生成今天日报", "生成日报"}:
+        return datetime.date.today()
+    if compact in {"生成昨天日报", "生成昨日日报"}:
+        return datetime.date.today() - datetime.timedelta(days=1)
+    hyphen_date = re.fullmatch(r"(?:生成)?(\d{4}-\d{1,2}-\d{1,2})(?:的)?日报", compact)
+    if hyphen_date:
+        return hyphen_date.group(1)
+    chinese_date = re.fullmatch(
+        r"(?:生成)?(\d{4})年(\d{1,2})月(\d{1,2})日(?:的)?日报",
+        compact,
+    )
+    if chinese_date:
+        year, month, day = [int(value) for value in chinese_date.groups()]
+        return datetime.date(year, month, day)
     return None
 
 
@@ -248,17 +509,60 @@ def _route_parsed_action(
         return _run_finance_analysis("budget")
     if intent == "query_tag_analysis":
         return _run_finance_analysis("tag")
-    if intent == "generate_report":
+    if intent == "monthly_bill_report":
+        return _run_deepseek_report(
+            "monthly_bill_report",
+            "monthly_bill",
+            build_monthly_bill_payload,
+            fallback_monthly_bill_markdown,
+        )
+    if intent in {"daily_report", "generate_report", "generate_daily_report"}:
+        target = (action.get("query") or {}).get("date") or None
+        return _run_deepseek_report(
+            "daily_report",
+            "daily_report",
+            lambda: build_daily_report_payload(target),
+            fallback_daily_report_markdown,
+        )
+    if intent == "monthly_tag_analysis":
+        return _run_deepseek_report(
+            "monthly_tag_analysis",
+            "monthly_tag_analysis",
+            build_monthly_tag_analysis_payload,
+            fallback_monthly_tag_analysis_markdown,
+        )
+    if intent == "monthly_consumption_report":
+        return _run_deepseek_report(
+            "monthly_consumption_report",
+            "monthly_consumption_report",
+            build_monthly_consumption_report_payload,
+            fallback_monthly_consumption_report_markdown,
+        )
+    if intent == "generate_monthly_report":
+        target_month = (action.get("query") or {}).get("month") or None
         return {
             "success": True,
-            "text": build_daily_report_text(),
-            "card": build_daily_report_card(),
-            "action": "report",
+            "text": generate_monthly_report(target_month),
+            "action": "monthly_report",
+        }
+    if intent == "generate_yearly_report":
+        target_year = (action.get("query") or {}).get("year") or None
+        return {
+            "success": True,
+            "text": generate_yearly_report(target_year),
+            "action": "yearly_report",
         }
     if intent == "sync_bitable":
         return _run_sync(sync_callback, sync_dashboard_callback)
+    if intent == "sync_status":
+        return _run_sync_status(sync_dashboard_callback)
     if intent == "help":
-        return {"success": True, "text": HELP_TEXT, "action": "help"}
+        return {
+            "success": True,
+            "text": HELP_TEXT,
+            "card": prompt_library_card(),
+            "action": "help",
+        }
     if intent == "chat":
         return {
             "success": True,
@@ -459,11 +763,14 @@ def sync_dashboard_card(dashboard, sync_result):
         f"**失败：** {counts.get('failed', 0)}",
         f"**已写入 record_id：** {counts.get('record_id', 0)}",
         "",
-        (
+    ]
+    if sync_result.get("status_only"):
+        lines.append("**本次操作：** 仅检查状态，未触发同步。")
+    else:
+        lines.append(
             f"**本次同步：** 成功 {sync_result.get('succeeded', 0)}，"
             f"失败 {sync_result.get('failed', 0)}"
-        ),
-    ]
+        )
     if not sync_result.get("success"):
         lines.append(
             f"**本次错误：** code={sync_result.get('code', -1)}，"
@@ -507,6 +814,32 @@ def sync_dashboard_card(dashboard, sync_result):
     }
 
 
+def _run_sync_status(sync_dashboard_callback=None):
+    if sync_dashboard_callback is None:
+        return {"success": False, "text": "多维表格同步状态当前不可用。", "action": "sync_status"}
+    try:
+        dashboard = sync_dashboard_callback()
+    except Exception as exc:
+        return {
+            "success": False,
+            "text": f"同步状态检查失败：{type(exc).__name__}。请运行 --check 查看详细诊断。",
+            "action": "sync_status",
+        }
+    result = {
+        "success": bool(dashboard.get("success")),
+        "succeeded": 0,
+        "failed": 0,
+        "message": "同步状态检查完成。",
+        "status_only": True,
+    }
+    return {
+        "success": bool(dashboard.get("success")),
+        "text": _format_sync_status_text(dashboard),
+        "card": sync_dashboard_card(dashboard, result),
+        "action": "sync_status",
+    }
+
+
 def _run_sync(sync_callback, sync_dashboard_callback=None):
     if sync_callback is None:
         return {"success": False, "text": "多维表格同步当前不可用。", "action": "sync"}
@@ -538,6 +871,23 @@ def _run_sync(sync_callback, sync_dashboard_callback=None):
         "card": sync_dashboard_card(dashboard, result),
         "action": "sync",
     }
+
+
+def _format_sync_status_text(dashboard):
+    counts = dashboard.get("counts") or {}
+    fields = dashboard.get("fields") or {}
+    return "\n".join(
+        [
+            "飞书多维表格同步状态",
+            "",
+            f"本地总流水：{counts.get('total', 0)}",
+            f"已同步：{counts.get('synced', 0)}",
+            f"待同步：{counts.get('pending', 0)}",
+            f"失败：{counts.get('failed', 0)}",
+            f"已写入 record_id：{counts.get('record_id', 0)}",
+            f"字段状态：{fields.get('message') or '未检查'}",
+        ]
+    )
 
 
 def _run_finance_analysis(focus="overview"):

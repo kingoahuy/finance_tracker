@@ -11,14 +11,29 @@ import pandas as pd
 
 try:
     from .config import PROJECT_ROOT, load_env_file
+    from .derived_fields import (
+        DERIVED_COLUMNS,
+        DERIVED_SQLITE_DEFINITIONS,
+        derived_values,
+        enrich_transaction_fields,
+    )
     from .tagging import generate_tags
 except ImportError:
     from config import PROJECT_ROOT, load_env_file
+    from derived_fields import (
+        DERIVED_COLUMNS,
+        DERIVED_SQLITE_DEFINITIONS,
+        derived_values,
+        enrich_transaction_fields,
+    )
     from tagging import generate_tags
 
 load_env_file()
 DB_FILE = Path(os.getenv("FINANCE_DB_FILE", PROJECT_ROOT / "my_account_book.db"))
 MONTHLY_BUDGET = int(os.getenv("FINANCE_MONTHLY_BUDGET", "2000"))
+DERIVED_COLUMN_SQL = ", ".join(DERIVED_COLUMNS)
+DERIVED_PLACEHOLDERS = ", ".join("?" for _ in DERIVED_COLUMNS)
+DERIVED_UPDATE_SQL = ", ".join(f"{column} = ?" for column in DERIVED_COLUMNS)
 
 CATEGORIES = [
     "餐饮",
@@ -242,6 +257,8 @@ def init_db():
         _ensure_column(conn, "transactions", "deleted_by_open_id", "TEXT")
         _ensure_column(conn, "transactions", "delete_reason", "TEXT")
         _ensure_column(conn, "transactions", "status", "TEXT DEFAULT 'active'")
+        for column, definition in DERIVED_SQLITE_DEFINITIONS.items():
+            _ensure_column(conn, "transactions", column, definition)
         _ensure_column(conn, "email_jobs", "created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
         conn.execute(
             """
@@ -356,15 +373,17 @@ def add_transaction(data):
     source_user_open_id = data.get("source_user_open_id")
     source_chat_id = data.get("source_chat_id")
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    enriched = enrich_transaction_fields({**normalized, "status": "active"})
 
     with connect() as conn:
         cursor = conn.execute(
-            """
+            f"""
             INSERT INTO transactions
                 (date, type, category, amount, description, tags, is_need, is_fixed,
-                 transaction_uid, source, source_message_id, source_user_open_id,
-                 source_chat_id, updated_at, sync_status, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'active')
+                  transaction_uid, source, source_message_id, source_user_open_id,
+                  source_chat_id, updated_at, sync_status, status, {DERIVED_COLUMN_SQL})
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'active',
+                    {DERIVED_PLACEHOLDERS})
             """,
             (
                 normalized["date"],
@@ -381,6 +400,7 @@ def add_transaction(data):
                 source_user_open_id,
                 source_chat_id,
                 now,
+                *[enriched.get(column) for column in DERIVED_COLUMNS],
             ),
         )
         transaction_id = cursor.lastrowid
@@ -400,6 +420,7 @@ def add_transaction(data):
         "source_chat_id": source_chat_id,
         "status": "active",
         "sync_status": "pending",
+        **{column: enriched.get(column) for column in DERIVED_COLUMNS},
     }
 
 
@@ -520,7 +541,7 @@ def load_transactions(include_deleted=False):
     with connect() as conn:
         try:
             df = pd.read_sql(
-                """
+                f"""
                 SELECT
                     rowid AS _rowid,
                     id,
@@ -545,7 +566,8 @@ def load_transactions(include_deleted=False):
                     deleted_at,
                     deleted_by_open_id,
                     delete_reason,
-                    status
+                    status,
+                    {DERIVED_COLUMN_SQL}
                 FROM transactions
                 WHERE (? = 1 OR status = 'active')
                 ORDER BY date DESC, rowid DESC
@@ -568,6 +590,20 @@ def load_transactions(include_deleted=False):
     df["source"] = df["source"].fillna("streamlit")
     df["sync_status"] = df["sync_status"].fillna("pending")
     df["status"] = df["status"].fillna("active")
+    numeric_columns = [
+        "date_year", "date_month", "date_day", "date_week_number",
+        "income_amount", "expense_amount", "net_amount",
+        "is_income", "is_expense", "is_active",
+    ]
+    for column in numeric_columns:
+        if column in df.columns:
+            df[column] = pd.to_numeric(df[column], errors="coerce")
+    for column in (
+        "date_year_month", "date_weekday", "date_quarter",
+        "amount_bucket", "tags_text", "ledger_month", "data_version",
+    ):
+        if column in df.columns:
+            df[column] = df[column].fillna("")
     return df
 
 
@@ -635,15 +671,19 @@ def update_transactions_from_editor(edited_df, original_rowids=None):
         }
 
         for rowid in current_rowids - edited_rowids:
+            deleted_derived = derived_values(
+                {**current_rows[rowid], "status": "deleted"}
+            )
             conn.execute(
-                """
+                f"""
                 UPDATE transactions
                 SET status = 'deleted', deleted_at = CURRENT_TIMESTAMP,
                     delete_reason = 'streamlit editor', updated_at = CURRENT_TIMESTAMP,
-                    sync_status = 'pending'
+                    sync_status = 'pending',
+                    {DERIVED_UPDATE_SQL}
                 WHERE rowid = ? AND status = 'active'
                 """,
-                (rowid,),
+                (*deleted_derived, rowid),
             )
             _enqueue_sync(conn, current_rows[rowid]["transaction_uid"], "update")
             result["deleted"] += 1
@@ -661,6 +701,7 @@ def update_transactions_from_editor(edited_df, original_rowids=None):
                 normalized["is_need"],
                 normalized["is_fixed"],
             )
+            row_derived = derived_values({**normalized, "status": "active"})
             if pd.notna(rowid) and int(rowid) in current_rowids:
                 current = current_rows[int(rowid)]
                 if values == (
@@ -676,7 +717,7 @@ def update_transactions_from_editor(edited_df, original_rowids=None):
                     continue
                 transaction_uid = current["transaction_uid"]
                 conn.execute(
-                    """
+                    f"""
                     UPDATE transactions
                     SET date = ?,
                         type = ?,
@@ -688,24 +729,32 @@ def update_transactions_from_editor(edited_df, original_rowids=None):
                         is_fixed = ?,
                         updated_at = CURRENT_TIMESTAMP,
                         sync_status = 'pending',
-                        sync_error = ''
+                        sync_error = '',
+                        {DERIVED_UPDATE_SQL}
                     WHERE rowid = ?
                       AND status = 'active'
                     """,
-                    (*values, int(rowid)),
+                    (*values, *row_derived, int(rowid)),
                 )
                 _enqueue_sync(conn, transaction_uid, "update")
                 result["updated"] += 1
             elif row["date"]:
                 transaction_uid = str(uuid.uuid4())
                 cursor = conn.execute(
-                    """
+                    f"""
                     INSERT INTO transactions
                         (date, type, category, amount, description, tags, is_need, is_fixed,
-                         transaction_uid, source, updated_at, sync_status)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'streamlit', CURRENT_TIMESTAMP, 'pending')
+                         transaction_uid, source, updated_at, sync_status, status,
+                         {DERIVED_COLUMN_SQL})
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'streamlit',
+                            CURRENT_TIMESTAMP, 'pending', 'active',
+                            {DERIVED_PLACEHOLDERS})
                     """,
-                    (*values, transaction_uid),
+                    (
+                        *values,
+                        transaction_uid,
+                        *row_derived,
+                    ),
                 )
                 conn.execute(
                     "UPDATE transactions SET id = COALESCE(id, ?) WHERE rowid = ?",
@@ -714,6 +763,106 @@ def update_transactions_from_editor(edited_df, original_rowids=None):
                 _enqueue_sync(conn, transaction_uid, "create")
                 result["created"] += 1
     return result
+
+
+def backfill_derived_fields(apply=False, example_limit=10):
+    init_db()
+    with connect() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT rowid, id, transaction_uid, date, type, amount, tags, status,
+                   {DERIVED_COLUMN_SQL}
+            FROM transactions
+            ORDER BY rowid ASC
+            """
+        ).fetchall()
+        planned = []
+        for row in rows:
+            base = {
+                "date": row[3],
+                "type": row[4],
+                "amount": row[5],
+                "tags": row[6],
+                "status": row[7] or "active",
+            }
+            desired = derived_values(base)
+            current = tuple(row[8:8 + len(DERIVED_COLUMNS)])
+            if _derived_tuple_equal(current, desired):
+                continue
+            planned.append(
+                {
+                    "rowid": int(row[0]),
+                    "local_id": int(row[1] or row[0]),
+                    "transaction_uid": str(row[2] or ""),
+                    "transaction_uid_prefix": str(row[2] or "")[:8],
+                    "date": str(row[3] or ""),
+                    "type": str(row[4] or ""),
+                    "amount": float(row[5] or 0),
+                    "status": str(row[7] or "active"),
+                    "derived": dict(zip(DERIVED_COLUMNS, desired)),
+                }
+            )
+        if apply:
+            for item in planned:
+                conn.execute(
+                    f"""
+                    UPDATE transactions
+                    SET {DERIVED_UPDATE_SQL},
+                        sync_status = 'pending',
+                        sync_error = '',
+                        updated_at = COALESCE(updated_at, CURRENT_TIMESTAMP)
+                    WHERE rowid = ?
+                    """,
+                    (
+                        *[
+                            item["derived"][column]
+                            for column in DERIVED_COLUMNS
+                        ],
+                        item["rowid"],
+                    ),
+                )
+                if item["transaction_uid"]:
+                    _enqueue_sync(conn, item["transaction_uid"], "update")
+    examples = [
+        {
+            key: value
+            for key, value in item.items()
+            if key != "transaction_uid"
+        }
+        for item in planned[: max(0, int(example_limit))]
+    ]
+    return {
+        "success": True,
+        "mode": "apply" if apply else "dry-run",
+        "planned_update_count": len(planned),
+        "updated_count": len(planned) if apply else 0,
+        "examples": examples,
+    }
+
+
+def _derived_tuple_equal(current, desired):
+    for left, right in zip(current, desired):
+        if right is None:
+            if left in (None, ""):
+                continue
+            return False
+        if isinstance(right, float):
+            try:
+                if round(float(left or 0), 2) == round(right, 2):
+                    continue
+            except (TypeError, ValueError):
+                pass
+            return False
+        if isinstance(right, int):
+            try:
+                if int(left or 0) == right:
+                    continue
+            except (TypeError, ValueError):
+                pass
+            return False
+        if str(left or "") != str(right or ""):
+            return False
+    return True
 
 
 def create_pending_action(

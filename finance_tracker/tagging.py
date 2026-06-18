@@ -153,8 +153,12 @@ def generate_tags(transaction, raw_text=None):
 
 def backfill_tags(apply=False, limit_examples=20):
     """Fill empty tags on active transactions without touching deleted rows."""
+    from .derived_fields import DERIVED_COLUMNS, derived_values
     from . import ledger
 
+    derived_update_sql = ", ".join(
+        f"{column} = ?" for column in DERIVED_COLUMNS
+    )
     ledger.init_db()
     with ledger.connect() as conn:
         rows = conn.execute(
@@ -188,23 +192,30 @@ def backfill_tags(apply=False, limit_examples=20):
                     "local_id": int(row[1] or row[0]),
                     "transaction_uid": str(row[2] or ""),
                     "date": str(row[3] or ""),
+                    "type": str(row[4] or "支出"),
                     "category": str(row[5] or "其他"),
                     "amount": float(row[6] or 0),
                     "tags": tags,
+                    "status": "active",
                 }
             )
 
         if apply:
             for item in planned:
                 conn.execute(
-                    """
+                    f"""
                     UPDATE transactions
                     SET tags = ?, sync_status = 'pending', sync_error = '',
-                        updated_at = CURRENT_TIMESTAMP
+                        updated_at = CURRENT_TIMESTAMP,
+                        {derived_update_sql}
                     WHERE rowid = ? AND status = 'active'
                       AND TRIM(COALESCE(tags, '')) = ''
                     """,
-                    (item["tags"], item["rowid"]),
+                    (
+                        item["tags"],
+                        *derived_values(item),
+                        item["rowid"],
+                    ),
                 )
                 conn.execute(
                     """

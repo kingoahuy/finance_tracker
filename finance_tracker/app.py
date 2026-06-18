@@ -14,6 +14,7 @@ if str(MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(MODULE_DIR))
 
 from config import save_env_values
+from derived_fields import DERIVED_FIELD_LABELS, DERIVED_FIELD_SPECS
 from bitable_sync import (
     check_bitable,
     full_sync,
@@ -38,6 +39,7 @@ from ledger import (
     update_transactions_from_editor,
 )
 from transaction_service import create_transactions_from_text
+from transaction_service import schedule_pending_sync
 
 # ================= 1. 核心配置 =================
 st.set_page_config(page_title="智账 Pro", layout="centered", page_icon="💸")
@@ -625,19 +627,24 @@ def main():
 
         st.markdown('<div class="css-card">', unsafe_allow_html=True)
         st.subheader("💾 数据管理")
-        st.caption("在此处可以直接修改过往记录或删除数据")
-        show_deleted = st.toggle("显示已删除流水", value=False)
-        manage_df = load_transactions(include_deleted=show_deleted)
+        st.caption(
+            "基础字段和飞书高级字段已合并到同一张原始表；"
+            "高级字段由系统自动计算，只读显示。"
+        )
+        manage_df = load_transactions()
 
         if not manage_df.empty:
             manage_df['tags'] = manage_df['tags'].fillna('')
             manage_df['is_need'] = manage_df['is_need'].fillna(0).astype(bool)
             manage_df['is_fixed'] = manage_df['is_fixed'].fillna(0).astype(bool)
-            active_manage_df = manage_df[
-                manage_df["status"].fillna("active") == "active"
-            ].copy()
+            active_manage_df = manage_df.copy()
             active_manage_df["_delete"] = False
             original_rowids = active_manage_df["_rowid"].astype(int).tolist()
+            derived_columns = [
+                column
+                for column in DERIVED_FIELD_LABELS
+                if column in active_manage_df.columns
+            ]
 
             column_config = {
                 "_delete": st.column_config.CheckboxColumn("删除"),
@@ -659,14 +666,38 @@ def main():
                 "amount": st.column_config.NumberColumn("金额", format="¥ %.2f"),
                 "is_need": st.column_config.CheckboxColumn("刚需?", help="1为刚需，0为享乐"),
                 "is_fixed": st.column_config.CheckboxColumn("固定?", help="是否为固定支出"),
+                "sync_status": st.column_config.TextColumn("飞书同步状态", disabled=True),
+                "feishu_record_id": st.column_config.TextColumn("飞书记录ID", disabled=True),
             }
+            for field in DERIVED_FIELD_SPECS:
+                column = field["key"]
+                if column not in derived_columns:
+                    continue
+                if field["bitable_type"] == 2:
+                    field_config = st.column_config.NumberColumn(
+                        field["label"],
+                        disabled=True,
+                    )
+                elif field["bitable_type"] == 7:
+                    field_config = st.column_config.CheckboxColumn(
+                        field["label"],
+                        disabled=True,
+                    )
+                else:
+                    field_config = st.column_config.TextColumn(
+                        field["label"],
+                        disabled=True,
+                    )
+                column_config[column] = field_config
 
-            editable_columns = [
+            original_table_columns = [
                 "_delete", "_rowid", "id", "date", "type", "category", "amount",
                 "description", "tags", "is_need", "is_fixed",
+                *derived_columns,
+                "sync_status", "feishu_record_id",
             ]
             edited_df = st.data_editor(
-                active_manage_df[editable_columns],
+                active_manage_df[original_table_columns],
                 column_config=column_config,
                 num_rows="dynamic",
                 width="stretch",
@@ -689,22 +720,10 @@ def main():
                         f"新增 {save_result['created']} 条，"
                         f"删除 {save_result['deleted']} 条"
                     )
+                    schedule_pending_sync()
                     st.rerun()
                 except (ValueError, KeyError) as exc:
                     st.error(str(exc))
-
-            if show_deleted:
-                deleted_df = manage_df[
-                    manage_df["status"].fillna("active") == "deleted"
-                ][
-                    [
-                        "id", "date", "type", "category", "amount",
-                        "description", "deleted_at", "delete_reason",
-                    ]
-                ]
-                if not deleted_df.empty:
-                    st.caption("已删除流水仅供查看，不能恢复或编辑")
-                    st.dataframe(deleted_df, hide_index=True, width="stretch")
         else:
             st.info("数据库暂无记录可管理")
         st.markdown('</div>', unsafe_allow_html=True)

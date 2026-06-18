@@ -87,6 +87,8 @@ class FeishuMenuDispatcherTest(unittest.TestCase):
                 "category_rank",
                 "budget_warning",
                 "daily_report",
+                "monthly_tag_analysis",
+                "monthly_consumption_report",
                 "sync_refresh",
                 "help",
             },
@@ -154,6 +156,68 @@ class FeishuMenuDispatcherTest(unittest.TestCase):
         )
         self.assertIn("未识别", text)
         self.assertIn("今日账单", text)
+
+    @mock.patch.object(
+        feishu_menu_dispatcher,
+        "call_deepseek_report",
+        return_value="# DeepSeek 标签分析",
+    )
+    @mock.patch.object(
+        feishu_menu_dispatcher,
+        "build_monthly_tag_analysis_payload",
+        return_value={"month": "2026-06"},
+    )
+    def test_monthly_tag_menu_calls_deepseek(self, payload_builder, deepseek):
+        text = feishu_menu_dispatcher.handle_menu_event(
+            "monthly_tag_analysis",
+            "open-1",
+        )
+        self.assertIn("DeepSeek 标签分析", text)
+        payload_builder.assert_called_once_with()
+        deepseek.assert_called_once_with(
+            "monthly_tag_analysis",
+            {"month": "2026-06"},
+        )
+
+    @mock.patch.object(
+        feishu_menu_dispatcher,
+        "call_deepseek_report",
+        side_effect=RuntimeError("offline"),
+    )
+    @mock.patch.object(
+        feishu_menu_dispatcher,
+        "fallback_monthly_consumption_report_markdown",
+        return_value="# 本地消费报告",
+    )
+    @mock.patch.object(
+        feishu_menu_dispatcher,
+        "build_monthly_consumption_report_payload",
+        return_value={"month": "2026-06"},
+    )
+    def test_monthly_consumption_menu_falls_back_locally(
+        self,
+        payload_builder,
+        fallback,
+        deepseek,
+    ):
+        text = feishu_menu_dispatcher.handle_menu_event(
+            "monthly_consumption_report",
+            "open-1",
+        )
+        self.assertIn("本地消费报告", text)
+        payload_builder.assert_called_once_with()
+        deepseek.assert_called_once_with(
+            "monthly_consumption_report",
+            {"month": "2026-06"},
+        )
+        fallback.assert_called_once_with({"month": "2026-06"})
+
+    def test_help_lists_deepseek_reports_and_common_commands(self):
+        text = feishu_menu_dispatcher.handle_menu_event("help", "open-1")
+        self.assertIn("本月标签分析", text)
+        self.assertIn("本月消费报告", text)
+        self.assertIn("修改上一笔金额为 32", text)
+        self.assertIn("同步状态", text)
 
     @mock.patch.object(
         feishu_bot,

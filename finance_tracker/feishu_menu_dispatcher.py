@@ -7,7 +7,16 @@ try:
         get_finance_overview,
     )
     from .bitable_sync import sync_pending_transactions
+    from .deepseek_reports import (
+        call_deepseek_report,
+        fallback_monthly_consumption_report_markdown,
+        fallback_monthly_tag_analysis_markdown,
+    )
     from .feishu_report import build_daily_report_text
+    from .reporting import (
+        build_monthly_consumption_report_payload,
+        build_monthly_tag_analysis_payload,
+    )
 except ImportError:
     from analytics import (
         get_budget_warning,
@@ -15,7 +24,16 @@ except ImportError:
         get_finance_overview,
     )
     from bitable_sync import sync_pending_transactions
+    from deepseek_reports import (
+        call_deepseek_report,
+        fallback_monthly_consumption_report_markdown,
+        fallback_monthly_tag_analysis_markdown,
+    )
     from feishu_report import build_daily_report_text
+    from reporting import (
+        build_monthly_consumption_report_payload,
+        build_monthly_tag_analysis_payload,
+    )
 
 
 MENU_EVENT_TYPE = "application.bot.menu_v6"
@@ -27,10 +45,20 @@ MENU_HELP_TEXT = """智账 Pro 菜单
 - 分类排行：查看本月支出分类前五
 - 预算预警：查看接近超支和已超支分类
 - 生成日报：生成今日财务日报
+- 本月标签分析：调用 DeepSeek 分析消费标签和场景
+- 本月消费报告：调用 DeepSeek 生成完整月度消费报告
 - 同步刷新：同步待处理流水到飞书多维表格
 - 使用帮助：查看菜单说明
 
-也可以直接发送自然语言记账，例如：午饭 25 元。"""
+文字指令也可以直接发送：
+- 记账：午饭 25 元
+- 查账：今日账单、本月账单、最近5笔
+- 报告：本月标签分析、本月消费报告、生成今日日报
+- 修改：修改上一笔金额为 32
+- 删除：删除上一笔
+- 同步：同步数据、同步状态
+
+涉及新增、修改和删除的操作仍需卡片确认。"""
 
 
 def handle_menu_event(event_key, user_id):
@@ -105,6 +133,31 @@ def _daily_report(_user_id):
     return build_daily_report_text()
 
 
+def _monthly_tag_analysis(_user_id):
+    payload = build_monthly_tag_analysis_payload()
+    return _deepseek_report(
+        "monthly_tag_analysis",
+        payload,
+        fallback_monthly_tag_analysis_markdown,
+    )
+
+
+def _monthly_consumption_report(_user_id):
+    payload = build_monthly_consumption_report_payload()
+    return _deepseek_report(
+        "monthly_consumption_report",
+        payload,
+        fallback_monthly_consumption_report_markdown,
+    )
+
+
+def _deepseek_report(prompt_name, payload, fallback_builder):
+    try:
+        return call_deepseek_report(prompt_name, payload)
+    except Exception:
+        return fallback_builder(payload)
+
+
 def _sync_refresh(_user_id):
     result = sync_pending_transactions()
     succeeded = int(result.get("succeeded", 0) or 0)
@@ -141,6 +194,8 @@ MENU_HANDLERS = {
     "category_rank": _category_rank,
     "budget_warning": _budget_warning,
     "daily_report": _daily_report,
+    "monthly_tag_analysis": _monthly_tag_analysis,
+    "monthly_consumption_report": _monthly_consumption_report,
     "sync_refresh": _sync_refresh,
     "help": _help,
 }
