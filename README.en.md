@@ -359,4 +359,5 @@ The README structure is inspired by several well-written open-source projects:
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+This project is licensed under the [MIT License](LICENSE). You may use,
+study, modify, and redistribute the code while retaining the license notice.

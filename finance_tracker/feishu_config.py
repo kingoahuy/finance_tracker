@@ -60,7 +60,9 @@ def get_feishu_config(env_path=None):
         bot_enabled=_as_bool(os.getenv("FEISHU_BOT_ENABLED"), True),
         bitable_sync_enabled=_as_bool(os.getenv("FEISHU_BITABLE_SYNC_ENABLED"), True),
         auto_sync=_as_bool(os.getenv("FEISHU_AUTO_SYNC"), True),
-        daily_report_enabled=_as_bool(os.getenv("FEISHU_DAILY_REPORT_ENABLED"), True),
+        # Proactive messages must be opt-in. A missing setting must never
+        # silently enable scheduled Feishu delivery.
+        daily_report_enabled=_as_bool(os.getenv("FEISHU_DAILY_REPORT_ENABLED"), False),
         daily_report_time=os.getenv("FEISHU_DAILY_REPORT_TIME", "21:30").strip(),
         log_level=os.getenv("FEISHU_LOG_LEVEL", "INFO").strip().upper(),
         sync_retry_limit=max(1, int(os.getenv("FEISHU_SYNC_RETRY_LIMIT", "5"))),

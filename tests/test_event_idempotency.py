@@ -30,7 +30,7 @@ class FakeClient:
         return {"success": True, "code": 0, "message": "", "log_id": "test"}
 
 
-def fake_event(event_id="event-1", message_id="message-1"):
+def fake_event(event_id="event-1", message_id="message-1", sender_type="user"):
     message = SimpleNamespace(
         message_id=message_id,
         chat_id="chat-1",
@@ -38,7 +38,10 @@ def fake_event(event_id="event-1", message_id="message-1"):
         mentions=[],
         content=json.dumps({"text": "午饭25"}, ensure_ascii=False),
     )
-    sender = SimpleNamespace(sender_id=SimpleNamespace(open_id="open-1"))
+    sender = SimpleNamespace(
+        sender_id=SimpleNamespace(open_id="open-1"),
+        sender_type=sender_type,
+    )
     return SimpleNamespace(
         header=SimpleNamespace(event_id=event_id),
         event=SimpleNamespace(message=message, sender=sender),
@@ -158,6 +161,25 @@ class EventIdempotencyTest(unittest.TestCase):
         self.assertIn("card_response", saved)
         self.assertIn("fallback_text_response", saved)
         self.assertEqual(pending_count, 1)
+
+    def test_bot_or_application_message_does_not_trigger_reply(self):
+        client = FakeClient()
+        result = feishu_bot.handle_message_event(
+            fake_event(
+                event_id="event-from-bot",
+                message_id="message-from-bot",
+                sender_type="app",
+            ),
+            client,
+            self.config,
+        )
+        self.assertIsNone(result)
+        self.assertEqual(client.messages, [])
+        with ledger.connect() as conn:
+            processed = conn.execute(
+                "SELECT COUNT(*) FROM processed_events"
+            ).fetchone()[0]
+        self.assertEqual(processed, 0)
 
 
 if __name__ == "__main__":

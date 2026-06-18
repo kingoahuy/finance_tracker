@@ -83,6 +83,10 @@ def call_deepseek_report(prompt_name: str, data_payload: dict) -> str:
         client = OpenAI(
             api_key=config["api_key"],
             base_url=config["base_url"],
+            # Menu callbacks run on the Feishu event connection. Automatic
+            # SDK retries can stretch a 15-second timeout to nearly a minute,
+            # causing Feishu to redeliver the same menu event.
+            max_retries=0,
         )
         response = client.chat.completions.create(
             model=config["model"],
