@@ -35,12 +35,20 @@ INTENTS = {
     "query_category_rank",
     "query_budget_analysis",
     "query_tag_analysis",
+    "monthly_bill_report",
+    "daily_report",
+    "monthly_tag_analysis",
+    "monthly_consumption_report",
+    "generate_daily_report",
+    "generate_monthly_report",
+    "generate_yearly_report",
     "delete_last_transaction",
     "delete_transaction_by_id",
     "update_last_transaction",
     "update_transaction_by_id",
     "generate_report",
     "sync_bitable",
+    "sync_status",
     "chat",
     "help",
     "unknown",
@@ -212,6 +220,10 @@ def validate_action(value, default_date=None):
     if category and category not in CATEGORIES:
         category = "其他"
 
+    query_date = str(query.get("date") or value.get("date") or "")[:20]
+    query_month = str(query.get("month") or value.get("month") or "")[:20]
+    query_year = str(query.get("year") or value.get("year") or "")[:10]
+
     return {
         "intent": intent,
         "confidence": confidence,
@@ -227,6 +239,9 @@ def validate_action(value, default_date=None):
             "period": str(query.get("period") or "")[:30],
             "category": category,
             "limit": limit,
+            "date": query_date,
+            "month": query_month,
+            "year": query_year,
         },
         "limit": limit,
         "requires_confirmation": bool(
@@ -344,7 +359,7 @@ def _local_action(text, base_date, reason, context=None):
         action["need_confirmation"] = True
         return action
 
-    query_action = _local_query_action(text, reason)
+    query_action = _local_query_action(text, reason, base_date)
     if query_action:
         return query_action
 
@@ -384,11 +399,43 @@ def _local_action(text, base_date, reason, context=None):
     return action
 
 
-def _local_query_action(text, reason):
+def _local_query_action(text, reason, base_date=None):
     compact = re.sub(r"\s+", "", text)
+    if compact in {"帮助", "你能做什么", "提示词", "记账帮助", "使用说明", "help", "/help"}:
+        return _simple_action("help", reason)
+    if any(phrase in compact for phrase in ("同步财务看板", "更新财务看板", "飞书财务看板同步")):
+        return _unknown("dashboard_sync_removed")
     if compact in {
-        "本月财务分析",
+        "本月账单",
+        "这个月账单",
+        "本月收支",
+        "这个月花了多少",
+        "这个月收入多少",
+    }:
+        return _simple_action("monthly_bill_report", reason)
+    daily_date = _local_daily_report_date(compact, base_date)
+    if daily_date:
+        action = _simple_action("daily_report", reason)
+        action["query"]["period"] = "date"
+        action["query"]["date"] = daily_date
+        return action
+    if compact in {
+        "本月标签分析",
+        "这个月标签分析",
+        "看看我的消费标签",
+        "本月消费场景",
+        "这个月钱花在哪些场景",
+    }:
+        return _simple_action("monthly_tag_analysis", reason)
+    if compact in {
         "本月消费报告",
+        "生成本月消费报告",
+        "本月财务分析",
+        "看看这个月消费情况",
+        "这个月消费怎么样",
+    }:
+        return _simple_action("monthly_consumption_report", reason)
+    if compact in {
         "看看我的消费结构",
     }:
         return _simple_action("query_finance_analysis", reason)
@@ -396,7 +443,7 @@ def _local_query_action(text, reason):
         return _simple_action("query_category_rank", reason)
     if compact == "本月预算情况":
         return _simple_action("query_budget_analysis", reason)
-    if compact == "本月标签分析":
+    if compact == "本月标签分析简版":
         return _simple_action("query_tag_analysis", reason)
     recent = re.search(r"最近(\d+)笔", compact)
     if recent:
@@ -426,16 +473,66 @@ def _local_query_action(text, reason):
     if any(
         phrase in compact
         for phrase in (
-            "这个月支出了多少", "本月支出", "这个月收入多少",
-            "本月收入", "这个月消费情况", "本月账单",
+            "这个月支出了多少", "本月支出",
+            "本月收入", "这个月消费情况", "本月账单简版",
         )
     ):
         return _simple_action("query_month_summary", reason)
     if compact in {"生成今日日报", "生成日报"}:
-        return _simple_action("generate_report", reason)
-    if compact in {"同步状态", "同步数据"}:
+        return _simple_action("generate_daily_report", reason)
+    if compact in {"生成昨天日报", "生成昨日日报"}:
+        action = _simple_action("generate_daily_report", reason)
+        action["query"]["period"] = "yesterday"
+        action["query"]["date"] = (
+            datetime.date.today() - datetime.timedelta(days=1)
+        ).isoformat()
+        return action
+    daily = re.fullmatch(r"生成(\d{4}-\d{1,2}-\d{1,2})日报", compact)
+    if daily:
+        action = _simple_action("generate_daily_report", reason)
+        action["query"]["period"] = "date"
+        action["query"]["date"] = daily.group(1)
+        return action
+    if compact == "生成本月月报":
+        return _simple_action("generate_monthly_report", reason)
+    monthly = re.fullmatch(r"生成(\d{4}-\d{1,2})月报", compact)
+    if monthly:
+        action = _simple_action("generate_monthly_report", reason)
+        action["query"]["period"] = "month"
+        action["query"]["month"] = monthly.group(1)
+        return action
+    if compact == "生成今年年报":
+        return _simple_action("generate_yearly_report", reason)
+    yearly = re.fullmatch(r"生成(\d{4})年报", compact)
+    if yearly:
+        action = _simple_action("generate_yearly_report", reason)
+        action["query"]["period"] = "year"
+        action["query"]["year"] = yearly.group(1)
+        return action
+    if compact in {"同步状态", "检查同步"}:
+        return _simple_action("sync_status", reason)
+    if compact in {"同步数据", "同步到飞书多维表格"}:
         return _simple_action("sync_bitable", reason)
     return None
+
+
+def _local_daily_report_date(compact, base_date=None):
+    today = _as_date(base_date or datetime.date.today())
+    if compact in {"记账日报", "生成今日日报", "生成今天日报", "生成日报"}:
+        return today.isoformat()
+    if compact in {"生成昨天日报", "生成昨日日报"}:
+        return (today - datetime.timedelta(days=1)).isoformat()
+    hyphen_date = re.fullmatch(r"(?:生成)?(\d{4}-\d{1,2}-\d{1,2})(?:的)?日报", compact)
+    if hyphen_date:
+        return _as_date(hyphen_date.group(1)).isoformat()
+    chinese_date = re.fullmatch(
+        r"(?:生成)?(\d{4})年(\d{1,2})月(\d{1,2})日(?:的)?日报",
+        compact,
+    )
+    if chinese_date:
+        year, month, day = [int(value) for value in chinese_date.groups()]
+        return datetime.date(year, month, day).isoformat()
+    return ""
 
 
 def _local_mutation_action(text, reason):
@@ -494,7 +591,7 @@ def _local_revision(text):
     if category_match and category_match.group(1) in CATEGORIES:
         updates["category"] = category_match.group(1)
     description_match = re.search(
-        r"(?:说明|备注)(?:改成|改为|为|是)?\s*([^，,。]+)",
+        r"(?:说明|备注|描述)(?:改成|改为|为|是)?\s*([^，,。]+)",
         text,
     )
     if description_match:
@@ -512,7 +609,14 @@ def _simple_action(intent, reason):
         "transaction_id": None,
         "revision": {},
         "updates": {},
-        "query": {"period": "", "category": None, "limit": 5},
+        "query": {
+            "period": "",
+            "category": None,
+            "limit": 5,
+            "date": "",
+            "month": "",
+            "year": "",
+        },
         "limit": 5,
         "requires_confirmation": intent in MUTATING_INTENTS,
         "reason": reason,
@@ -634,7 +738,10 @@ category 只能是：{categories}
   "query": {{
     "period": "today",
     "category": null,
-    "limit": 5
+    "limit": 5,
+    "date": "",
+    "month": "",
+    "year": ""
   }},
   "requires_confirmation": false
 }}
@@ -654,13 +761,30 @@ category 只能是：{categories}
 10. 示例：“今天下午在食堂吃饭花了10.4元”应包含
     tags=["食堂","晚餐","刚需"]、is_need=true、is_fixed=false。
 11. 财务分析查询只返回 intent，不编造统计结果：
-    “本月财务分析”“本月消费报告”“看看我的消费结构”
-    使用 query_finance_analysis；
+    “本月账单”“这个月账单”“本月收支”“这个月花了多少”“这个月收入多少”
+    使用 monthly_bill_report；
+    “本月消费报告”“生成本月消费报告”“本月财务分析”“看看这个月消费情况”
+    使用 monthly_consumption_report；
+    “看看我的消费结构”使用 query_finance_analysis；
     “这个月哪些地方花得最多”使用 query_category_rank；
     “本月预算情况”使用 query_budget_analysis；
-    “本月标签分析”使用 query_tag_analysis。
-12. “同步状态”“同步数据”使用 sync_bitable，requires_confirmation=false；
-    只同步 .env 中 FEISHU_BITABLE_TABLE_ID 对应的原始明细数据表。
+    “本月标签分析”“这个月标签分析”“看看我的消费标签”“本月消费场景”
+    使用 monthly_tag_analysis。
+12. “同步状态”“检查同步”使用 sync_status；“同步数据”“同步到飞书多维表格”使用 sync_bitable；
+    requires_confirmation=false，只同步 .env 中 FEISHU_BITABLE_TABLE_ID 对应的原始明细数据表。
+13. “帮助”“你能做什么”“提示词”“记账帮助”“使用说明”使用 help。
+14. 查账和报表不需要确认：
+    “今日账单”“今天花了多少钱”使用 query_today_summary；
+    “本月账单简版”“这个月支出了多少”使用 query_month_summary；
+    “最近5笔”“最近10笔”使用 query_recent_transactions，并写入 query.limit；
+    “餐饮这个月花了多少”“交通这个月花了多少”使用 query_category_summary，并写入 query.category。
+15. 报告只返回 intent 和参数，不生成报告内容：
+    “记账日报”“生成今日日报”“生成昨天日报”“生成 2026-06-14 日报”“2026年6月14日的日报”
+    使用 daily_report，
+    指定日期时写入 query.date；
+    “生成本月月报”“生成 2026-06 月报”使用 generate_monthly_report，指定月份时写入 query.month；
+    “生成今年年报”“生成 2026 年报”使用 generate_yearly_report，指定年份时写入 query.year。
+16. “同步财务看板”“更新财务看板”“飞书财务看板同步”已经停用，返回 unknown，不要改成 sync_bitable。
 """.strip()
 
 

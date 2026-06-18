@@ -20,10 +20,27 @@
 
 ## 3. 配置长连接事件
 
-1. 在“事件与回调”中选择长连接模式。
-2. 添加事件 `im.message.receive_v1`，并启用卡片回传交互 `card.action.trigger`。
-3. 无需公网 IP、域名或 HTTP 回调地址。
-4. 发布应用版本，并确保应用在当前企业内可用。
+本项目使用飞书 SDK 的 WebSocket 长连接，不使用 HTTP Webhook。
+
+1. 在“事件与回调”中，把事件接收方式切换为“使用长连接接收事件”。
+2. 添加事件 `im.message.receive_v1`。
+3. 如需机器人菜单，再添加机器人自定义菜单事件。
+4. 启用卡片交互回传；项目已注册 `card.action.trigger` 处理器。
+5. 保存并发布应用版本，确保应用在当前企业内可用。
+
+长连接模式**不需要填写请求地址、端口、公网 IP 或域名**。如果飞书页面仍要求填写
+“请求地址”，说明当前选中的是“将事件发送至开发者服务器”模式；返回事件订阅页面，
+改选“使用长连接接收事件”即可。项目启动后由
+`finance_tracker/feishu_bot.py` 主动连接飞书，`service_runner.py` 会持续守护该进程。
+
+可以用下面两条命令确认本地长连接是否已启动：
+
+```powershell
+.\service_status.bat
+Get-Content .\logs\feishu_bot.log -Tail 30
+```
+
+日志中出现 `Starting Feishu long-connection bot.` 即表示程序已进入长连接启动流程。
 
 ## 4. 首次获取 open_id
 
@@ -106,6 +123,8 @@ AI_PARSER_FALLBACK_TO_LOCAL=true
 - `最近5笔`
 - `最近N笔`
 - `生成日报`
+- `本月标签分析`（菜单事件键：`monthly_tag_analysis`）
+- `本月消费报告`（菜单事件键：`monthly_consumption_report`）
 - `同步状态`
 - `撤销上一笔`
 - `删除 ID 12`

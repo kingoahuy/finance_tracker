@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest import mock
 
 from finance_tracker import ledger, transaction_service
+from finance_tracker.derived_fields import DATA_VERSION, DERIVED_COLUMNS
 
 
 class TransactionServiceTest(unittest.TestCase):
@@ -17,6 +18,145 @@ class TransactionServiceTest(unittest.TestCase):
     def tearDown(self):
         ledger.DB_FILE = self.original_db
         self.temp_dir.cleanup()
+
+    def _fetch_derived(self, transaction_uid):
+        with ledger.connect() as conn:
+            row = conn.execute(
+                f"""
+                SELECT {", ".join(DERIVED_COLUMNS)}
+                FROM transactions
+                WHERE transaction_uid = ?
+                """,
+                (transaction_uid,),
+            ).fetchone()
+        self.assertIsNotNone(row)
+        return dict(zip(DERIVED_COLUMNS, row))
+
+    def _assert_derived_complete(self, record):
+        text_columns = {
+            "date_year_month",
+            "date_weekday",
+            "date_quarter",
+            "amount_bucket",
+            "tags_text",
+            "ledger_month",
+            "data_version",
+        }
+        for column in DERIVED_COLUMNS:
+            self.assertIn(column, record)
+            self.assertIsNotNone(record[column], column)
+            if column in text_columns:
+                self.assertNotEqual(str(record[column]).strip(), "", column)
+
+    def test_add_transaction_writes_expense_derived_fields_immediately(self):
+        record = ledger.add_transaction(
+            {
+                "date": "2026-06-14",
+                "type": "支出",
+                "category": "餐饮",
+                "amount": 10.4,
+                "description": "早餐",
+                "tags": "早餐",
+            }
+        )
+        self._assert_derived_complete(record)
+        self.assertEqual(record["date_year"], 2026)
+        self.assertEqual(record["date_year_month"], "2026-06")
+        self.assertEqual(record["date_month"], 6)
+        self.assertEqual(record["date_day"], 14)
+        self.assertEqual(record["date_quarter"], "2026Q2")
+        self.assertEqual(record["ledger_month"], "2026-06")
+        self.assertEqual(record["income_amount"], 0.0)
+        self.assertEqual(record["expense_amount"], 10.4)
+        self.assertEqual(record["net_amount"], -10.4)
+        self.assertEqual(record["is_income"], 0)
+        self.assertEqual(record["is_expense"], 1)
+        self.assertEqual(record["is_active"], 1)
+        self.assertEqual(record["data_version"], DATA_VERSION)
+
+        persisted = self._fetch_derived(record["transaction_uid"])
+        self._assert_derived_complete(persisted)
+        self.assertEqual(persisted["expense_amount"], 10.4)
+        self.assertEqual(persisted["net_amount"], -10.4)
+
+    def test_add_transaction_writes_income_derived_fields_immediately(self):
+        record = ledger.add_transaction(
+            {
+                "date": "2026-06-14",
+                "type": "收入",
+                "category": "工资",
+                "amount": 20000,
+                "description": "工资",
+                "tags": "工资",
+            }
+        )
+        self._assert_derived_complete(record)
+        self.assertEqual(record["income_amount"], 20000.0)
+        self.assertEqual(record["expense_amount"], 0.0)
+        self.assertEqual(record["net_amount"], 20000.0)
+        self.assertEqual(record["is_income"], 1)
+        self.assertEqual(record["is_expense"], 0)
+
+        persisted = self._fetch_derived(record["transaction_uid"])
+        self._assert_derived_complete(persisted)
+        self.assertEqual(persisted["income_amount"], 20000.0)
+        self.assertEqual(persisted["net_amount"], 20000.0)
+
+    def test_create_transactions_and_pending_confirm_write_derived_fields(self):
+        with mock.patch.object(transaction_service, "_try_sync"):
+            created = transaction_service.create_transactions(
+                [
+                    {
+                        "date": "2026-06-14",
+                        "type": "支出",
+                        "category": "餐饮",
+                        "amount": 10.4,
+                        "description": "早餐",
+                        "tags": "早餐",
+                    }
+                ],
+                source="feishu",
+                source_user_open_id="open-1",
+                source_chat_id="chat-1",
+            )[0]
+        self._assert_derived_complete(created)
+        self._assert_derived_complete(
+            self._fetch_derived(created["transaction_uid"])
+        )
+
+        pending = transaction_service.queue_action(
+            {
+                "intent": "create_transactions",
+                "transactions": [
+                    {
+                        "date": "2026-06-14",
+                        "type": "收入",
+                        "category": "工资",
+                        "amount": 20000,
+                        "description": "工资",
+                        "tags": "工资",
+                    }
+                ],
+            },
+            "open-1",
+            "chat-1",
+            source_message_id="msg-1",
+        )
+        with mock.patch.object(transaction_service, "_try_sync"):
+            result = transaction_service.resolve_action(
+                pending["action_id"],
+                "confirm",
+                "open-1",
+                "chat-1",
+            )
+        self.assertTrue(result["success"])
+        confirmed = result["transactions"][0]
+        self._assert_derived_complete(confirmed)
+        self.assertEqual(confirmed["income_amount"], 20000.0)
+        self.assertEqual(confirmed["net_amount"], 20000.0)
+        self._assert_derived_complete(
+            self._fetch_derived(confirmed["transaction_uid"])
+        )
 
     def test_feishu_and_streamlit_sources(self):
         with mock.patch.object(transaction_service, "_try_sync"):

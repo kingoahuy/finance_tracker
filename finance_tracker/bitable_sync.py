@@ -9,10 +9,12 @@ import re
 try:
     import lark_oapi as lark
     from lark_oapi.api.bitable.v1 import (
+        AppTableField,
         AppTableRecord,
         BatchDeleteAppTableRecordRequest,
         BatchDeleteAppTableRecordRequestBody,
         Condition,
+        CreateAppTableFieldRequest,
         CreateAppTableRecordRequest,
         DeleteAppTableRequest,
         FilterInfo,
@@ -27,13 +29,25 @@ except ImportError:
     lark = None
 
 try:
+    from .derived_fields import (
+        DERIVED_BITABLE_TYPES,
+        DERIVED_COLUMNS,
+        DERIVED_FIELD_LABELS,
+        enrich_transaction_fields,
+    )
     from .feishu_client import FeishuClient, response_result
     from .feishu_config import get_feishu_config
-    from .ledger import connect, init_db
+    from .ledger import backfill_derived_fields, connect, init_db
 except ImportError:
+    from derived_fields import (
+        DERIVED_BITABLE_TYPES,
+        DERIVED_COLUMNS,
+        DERIVED_FIELD_LABELS,
+        enrich_transaction_fields,
+    )
     from feishu_client import FeishuClient, response_result
     from feishu_config import get_feishu_config
-    from ledger import connect, init_db
+    from ledger import backfill_derived_fields, connect, init_db
 
 
 FIELD_MAP = {
@@ -55,8 +69,10 @@ FIELD_MAP = {
     "deleted_at": "删除时间",
     "deleted_by_open_id": "删除人",
     "delete_reason": "删除原因",
+    **DERIVED_FIELD_LABELS,
 }
 REQUIRED_FIELDS = tuple(FIELD_MAP.values())
+_FIELD_PREFLIGHT_CACHE = set()
 
 
 class BitableSyncError(RuntimeError):
@@ -79,6 +95,7 @@ def auto_sync_enabled():
 
 
 def transaction_to_bitable_fields(transaction):
+    transaction = enrich_transaction_fields(transaction)
     return {
         FIELD_MAP["transaction_uid"]: str(transaction.get("transaction_uid") or ""),
         FIELD_MAP["id"]: int(transaction.get("id") or 0),
@@ -108,6 +125,23 @@ def transaction_to_bitable_fields(transaction):
             _audit_identifier(transaction.get("deleted_by_open_id"))
         ),
         FIELD_MAP["delete_reason"]: str(transaction.get("delete_reason") or ""),
+        FIELD_MAP["date_year"]: transaction.get("date_year"),
+        FIELD_MAP["date_year_month"]: str(transaction.get("date_year_month") or ""),
+        FIELD_MAP["date_month"]: transaction.get("date_month"),
+        FIELD_MAP["date_day"]: transaction.get("date_day"),
+        FIELD_MAP["date_weekday"]: str(transaction.get("date_weekday") or ""),
+        FIELD_MAP["date_week_number"]: transaction.get("date_week_number"),
+        FIELD_MAP["date_quarter"]: str(transaction.get("date_quarter") or ""),
+        FIELD_MAP["income_amount"]: float(transaction.get("income_amount") or 0),
+        FIELD_MAP["expense_amount"]: float(transaction.get("expense_amount") or 0),
+        FIELD_MAP["net_amount"]: float(transaction.get("net_amount") or 0),
+        FIELD_MAP["amount_bucket"]: str(transaction.get("amount_bucket") or ""),
+        FIELD_MAP["tags_text"]: str(transaction.get("tags_text") or ""),
+        FIELD_MAP["is_income"]: bool(transaction.get("is_income")),
+        FIELD_MAP["is_expense"]: bool(transaction.get("is_expense")),
+        FIELD_MAP["is_active"]: bool(transaction.get("is_active")),
+        FIELD_MAP["ledger_month"]: str(transaction.get("ledger_month") or ""),
+        FIELD_MAP["data_version"]: str(transaction.get("data_version") or ""),
     }
 
 
@@ -361,6 +395,30 @@ class BitableSyncService:
                 return result
             page_token = getattr(data, "page_token", None)
 
+    def create_field(self, field_name, field_type, table_id=None):
+        table_id = table_id or self.config.bitable_table_id
+        field = (
+            AppTableField.builder()
+            .field_name(str(field_name))
+            .type(int(field_type))
+            .build()
+        )
+        request = (
+            CreateAppTableFieldRequest.builder()
+            .app_token(self.config.bitable_app_token)
+            .table_id(table_id)
+            .request_body(field)
+            .build()
+        )
+        result = _sanitize_api_result(
+            response_result(
+                self.client.bitable.v1.app_table_field.create(request)
+            )
+        )
+        result.pop("data", None)
+        result["field_name"] = str(field_name)
+        return result
+
     def list_tables(self):
         tables = []
         page_token = None
@@ -488,12 +546,30 @@ def validate_fields(service=None):
                     "actual_ui_type": tag_field.get("ui_type", ""),
                 }
             )
+        existing_by_name = {
+            item.get("field_name"): item for item in result.get("fields") or []
+        }
+        for field_name, expected_type in DERIVED_BITABLE_TYPES.items():
+            field = existing_by_name.get(field_name)
+            if field and not _field_type_matches(field, expected_type):
+                invalid_field_types.append(
+                    {
+                        "field": field_name,
+                        "expected": _field_type_name(expected_type),
+                        "actual_type": field.get("type"),
+                        "actual_ui_type": field.get("ui_type", ""),
+                    }
+                )
         field_errors = []
         if missing_fields:
             field_errors.append("目标表缺少字段：" + "、".join(missing_fields))
-        if invalid_field_types:
+        if any(item["field"] == FIELD_MAP["tags"] for item in invalid_field_types):
             field_errors.append(
                 f"字段“{FIELD_MAP['tags']}”必须设置为多选，否则标签数组无法同步。"
+            )
+        if any(item["field"] != FIELD_MAP["tags"] for item in invalid_field_types):
+            field_errors.append(
+                "部分字段类型不匹配，请在飞书原始数据表中修正后再同步。"
             )
         return {
             "success": not missing_fields and not invalid_field_types,
@@ -510,6 +586,133 @@ def validate_fields(service=None):
         }
     except Exception as exc:
         return _field_failure(_safe_exception_message(exc, config))
+
+
+def ensure_main_table_fields(service=None):
+    try:
+        config = service.config if service is not None else get_feishu_config()
+    except Exception as exc:
+        return _field_failure(
+            f"读取飞书配置失败：{type(exc).__name__}"
+        )
+    missing = _missing_config(config)
+    if missing:
+        return _field_failure(
+            "飞书多维表格配置缺失：" + "、".join(missing)
+        )
+    try:
+        service = service or BitableSyncService(config=config)
+        fields_result = service.list_fields(
+            table_id=config.bitable_table_id
+        )
+    except Exception as exc:
+        return _field_failure(_safe_exception_message(exc, config))
+    if not fields_result.get("success"):
+        return _field_failure(
+            str(fields_result.get("message") or "读取字段失败"),
+            code=fields_result.get("code", -1),
+            log_id=fields_result.get("log_id", ""),
+        )
+
+    existing_by_name = {
+        item.get("field_name"): item
+        for item in fields_result.get("fields") or []
+        if item.get("field_name")
+    }
+    type_mismatches = []
+    skipped = []
+    created = []
+    create_errors = []
+    for field_name, expected_type in DERIVED_BITABLE_TYPES.items():
+        existing = existing_by_name.get(field_name)
+        if existing:
+            if _field_type_matches(existing, expected_type):
+                skipped.append(field_name)
+            else:
+                type_mismatches.append(
+                    {
+                        "field": field_name,
+                        "expected": _field_type_name(expected_type),
+                        "actual_type": existing.get("type"),
+                        "actual_ui_type": existing.get("ui_type", ""),
+                    }
+                )
+            continue
+        create_result = service.create_field(
+            field_name,
+            expected_type,
+            table_id=config.bitable_table_id,
+        )
+        if create_result.get("success"):
+            created.append(field_name)
+        else:
+            create_errors.append(
+                {
+                    "field": field_name,
+                    "code": int(create_result.get("code", -1) or -1),
+                    "message": _sanitize_api_message(
+                        str(create_result.get("message") or "创建字段失败")
+                    ),
+                    "log_id": str(create_result.get("log_id") or ""),
+                }
+            )
+
+    success = not type_mismatches and not create_errors
+    message = "主数据表派生字段已就绪。"
+    if type_mismatches:
+        message = "部分派生字段类型不匹配，未覆盖已有字段。"
+    if create_errors:
+        message = "部分派生字段创建失败。"
+    return {
+        "success": success,
+        "code": int(create_errors[0]["code"] if create_errors else 0),
+        "message": message,
+        "log_id": str(
+            create_errors[0]["log_id"]
+            if create_errors
+            else fields_result.get("log_id", "")
+        ),
+        "table_id": str(config.bitable_table_id or ""),
+        "created_count": len(created),
+        "created_fields": created,
+        "skipped_count": len(skipped),
+        "skipped_existing_fields": skipped,
+        "type_mismatches": type_mismatches,
+        "create_errors": create_errors,
+        "created_summary_tables": 0,
+    }
+
+
+def _prepare_sync_fields(service=None, config=None, use_cache=False):
+    config = config or (
+        service.config if service is not None else get_feishu_config()
+    )
+    cache_key = (
+        str(config.bitable_app_token or ""),
+        str(config.bitable_table_id or ""),
+    )
+    if use_cache and cache_key in _FIELD_PREFLIGHT_CACHE:
+        return {
+            "success": True,
+            "code": 0,
+            "message": "字段检查已通过。",
+            "log_id": "",
+            "missing_fields": [],
+            "invalid_field_types": [],
+        }
+
+    result = validate_fields(service=service)
+    missing = set(result.get("missing_fields") or [])
+    derived_labels = set(DERIVED_FIELD_LABELS.values())
+    if not result.get("success") and missing.intersection(derived_labels):
+        repair = ensure_main_table_fields(service=service)
+        if not repair.get("success"):
+            return repair
+        result = validate_fields(service=service)
+
+    if result.get("success"):
+        _FIELD_PREFLIGHT_CACHE.add(cache_key)
+    return result
 
 
 def check_bitable(service=None):
@@ -538,6 +741,115 @@ def check_bitable(service=None):
         "fields": fields,
         "message": fields["message"],
     }
+
+
+TEXT_DERIVED_COLUMNS = {
+    "date_year_month",
+    "date_weekday",
+    "date_quarter",
+    "amount_bucket",
+    "tags_text",
+    "ledger_month",
+    "data_version",
+}
+
+
+def audit_derived_fields(service=None):
+    init_db()
+    missing_clause = " OR ".join(
+        _derived_missing_sql(column) for column in DERIVED_COLUMNS
+    )
+    recent_rows = []
+    with connect() as conn:
+        total_transactions = conn.execute(
+            "SELECT COUNT(*) FROM transactions"
+        ).fetchone()[0]
+        active_missing_count = conn.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM transactions
+            WHERE status = 'active'
+              AND ({missing_clause})
+            """
+        ).fetchone()[0]
+        rows = conn.execute(
+            f"""
+            SELECT id, transaction_uid, date, type, amount, status,
+                   {", ".join(DERIVED_COLUMNS)}
+            FROM transactions
+            ORDER BY rowid DESC
+            LIMIT 10
+            """
+        ).fetchall()
+
+    base_columns = [
+        "local_id",
+        "transaction_uid",
+        "date",
+        "type",
+        "amount",
+        "status",
+    ]
+    for row in rows:
+        item = dict(zip([*base_columns, *DERIVED_COLUMNS], row))
+        missing_fields = [
+            column
+            for column in DERIVED_COLUMNS
+            if _derived_value_missing(column, item.get(column))
+        ]
+        recent_rows.append(
+            {
+                "local_id": int(item.get("local_id") or 0),
+                "transaction_uid_prefix": str(
+                    item.get("transaction_uid") or ""
+                )[:8],
+                "date": str(item.get("date") or ""),
+                "type": str(item.get("type") or ""),
+                "amount": float(item.get("amount") or 0),
+                "status": str(item.get("status") or ""),
+                "derived_complete": not missing_fields,
+                "missing_fields": missing_fields,
+            }
+        )
+
+    feishu_fields = validate_fields(service=service)
+    return {
+        "success": True,
+        "message": "Derived fields audit completed.",
+        "local_transactions_total": int(total_transactions or 0),
+        "active_missing_derived_count": int(active_missing_count or 0),
+        "recent_records": recent_rows,
+        "feishu_original_table_fields": {
+            "success": bool(feishu_fields.get("success")),
+            "missing_fields": feishu_fields.get("missing_fields") or [],
+            "invalid_field_types": feishu_fields.get("invalid_field_types") or [],
+            "all_derived_fields_present": bool(
+                feishu_fields.get("success")
+            ) and not any(
+                label in (feishu_fields.get("missing_fields") or [])
+                for label in DERIVED_FIELD_LABELS.values()
+            ),
+            "existing_derived_fields": [
+                label
+                for label in DERIVED_FIELD_LABELS.values()
+                if label in (feishu_fields.get("existing_fields") or [])
+            ],
+            "message": str(feishu_fields.get("message") or ""),
+            "log_id": str(feishu_fields.get("log_id") or ""),
+        },
+    }
+
+
+def _derived_missing_sql(column):
+    if column in TEXT_DERIVED_COLUMNS:
+        return f"({column} IS NULL OR TRIM(COALESCE({column}, '')) = '')"
+    return f"{column} IS NULL"
+
+
+def _derived_value_missing(column, value):
+    if column in TEXT_DERIVED_COLUMNS:
+        return value is None or str(value).strip() == ""
+    return value is None
 
 
 def sync_transaction(
@@ -582,17 +894,29 @@ def sync_transaction(
             error=result["message"],
         )
         return result
-    service = service or BitableSyncService(config=config)
+    if service is None:
+        preflight = _prepare_sync_fields(config=config, use_cache=True)
+        if not preflight.get("success"):
+            error = _format_api_error(preflight)
+            _finish_sync(
+                transaction_uid,
+                None,
+                success=False,
+                error=error,
+            )
+            return {"success": False, **preflight}
+        service = BitableSyncService(config=config)
 
     with connect() as conn:
+        derived_column_sql = ", ".join(DERIVED_COLUMNS)
         row = conn.execute(
-            """
+            f"""
             SELECT rowid, id, date, type, category, amount, description,
                    created_at, tags, is_need, is_fixed, transaction_uid,
                    source, source_message_id, feishu_record_id, updated_at,
                    sync_status, sync_error, source_user_open_id,
                    source_chat_id, deleted_at, deleted_by_open_id,
-                   delete_reason, status
+                   delete_reason, status, {derived_column_sql}
             FROM transactions
             WHERE transaction_uid = ?
             """,
@@ -605,8 +929,22 @@ def sync_transaction(
             "feishu_record_id", "updated_at", "sync_status", "sync_error",
             "source_user_open_id", "source_chat_id", "deleted_at",
             "deleted_by_open_id", "delete_reason", "status",
+            *DERIVED_COLUMNS,
         ]
         transaction = dict(zip(columns, row)) if row else None
+        if transaction:
+            transaction = enrich_transaction_fields(transaction)
+            conn.execute(
+                f"""
+                UPDATE transactions
+                SET {", ".join(f"{column} = ?" for column in DERIVED_COLUMNS)}
+                WHERE transaction_uid = ?
+                """,
+                (
+                    *[transaction.get(column) for column in DERIVED_COLUMNS],
+                    transaction_uid,
+                ),
+            )
         outbox = conn.execute(
             """
             SELECT id, operation FROM sync_outbox
@@ -737,7 +1075,10 @@ def sync_pending_transactions(limit=100, service=None, progress_callback=None):
             preflight=disabled,
             processed=len(rows),
         )
-    preflight = validate_fields(service=service)
+    preflight = _prepare_sync_fields(
+        service=service,
+        config=config,
+    )
     if not preflight["success"]:
         error = _format_api_error(preflight)
         _mark_sync_batch_failed([row[0] for row in rows], error)
@@ -782,7 +1123,10 @@ def full_sync(service=None, progress_callback=None):
             preflight=disabled,
             processed=len(transaction_uids),
         )
-    preflight = validate_fields(service=service)
+    preflight = _prepare_sync_fields(
+        service=service,
+        config=config,
+    )
     if not preflight["success"]:
         error = _format_api_error(preflight)
         _mark_sync_batch_failed(
@@ -1960,6 +2304,27 @@ def _is_multi_select_field(field):
     }
 
 
+def _field_type_matches(field, expected_type):
+    actual = field.get("type")
+    if str(actual) == str(expected_type):
+        return True
+    ui_type = str(field.get("ui_type") or "").strip().lower()
+    expected_ui = {
+        1: {"text"},
+        2: {"number"},
+        7: {"checkbox"},
+    }.get(int(expected_type), set())
+    return ui_type in expected_ui
+
+
+def _field_type_name(field_type):
+    return {
+        1: "文本",
+        2: "数字",
+        7: "复选框",
+    }.get(int(field_type), str(field_type))
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Sync finance transactions to Feishu Bitable."
@@ -1975,6 +2340,9 @@ def main():
     group.add_argument("--cleanup-test-records", action="store_true")
     group.add_argument("--list-tables", action="store_true")
     group.add_argument("--cleanup-summary-tables", action="store_true")
+    group.add_argument("--ensure-main-table-fields", action="store_true")
+    group.add_argument("--audit-derived-fields", action="store_true")
+    group.add_argument("--backfill-derived-fields", action="store_true")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--apply", action="store_true")
@@ -1989,16 +2357,21 @@ def main():
         or args.cleanup_test_records
         or args.cleanup_summary_tables
     )
+    mode_required_command = destructive_command or args.backfill_derived_fields
     if destructive_command and not (args.dry_run or args.apply):
         parser.error(
             "--dedupe-remote, --cleanup-test-records and "
             "--cleanup-summary-tables require --dry-run or --apply"
         )
-    if not destructive_command and (args.dry_run or args.apply):
+    if args.backfill_derived_fields and not (args.dry_run or args.apply):
+        parser.error(
+            "--backfill-derived-fields requires --dry-run or --apply"
+        )
+    if not mode_required_command and (args.dry_run or args.apply):
         parser.error(
             "--dry-run/--apply can only be used with "
             "--dedupe-remote, --cleanup-test-records or "
-            "--cleanup-summary-tables"
+            "--cleanup-summary-tables, or --backfill-derived-fields"
         )
     if (
         args.confirm_delete_summary_tables
@@ -2038,6 +2411,12 @@ def main():
         result = cleanup_test_records(apply=args.apply)
     elif args.list_tables:
         result = list_tables()
+    elif args.ensure_main_table_fields:
+        result = ensure_main_table_fields()
+    elif args.audit_derived_fields:
+        result = audit_derived_fields()
+    elif args.backfill_derived_fields:
+        result = backfill_derived_fields(apply=args.apply)
     else:
         result = cleanup_summary_tables(
             apply=args.apply,

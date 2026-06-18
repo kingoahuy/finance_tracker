@@ -132,7 +132,7 @@ class TagBackfillTest(unittest.TestCase):
             conn.execute(
                 """
                 UPDATE transactions
-                SET tags = '', sync_status = 'synced'
+                SET tags = '', tags_text = '', sync_status = 'synced'
                 WHERE transaction_uid = ?
                 """,
                 (self.active["transaction_uid"],),
@@ -146,7 +146,7 @@ class TagBackfillTest(unittest.TestCase):
         with ledger.connect() as conn:
             return conn.execute(
                 """
-                SELECT tags, sync_status
+                SELECT tags, sync_status, tags_text
                 FROM transactions
                 WHERE transaction_uid = ?
                 """,
@@ -157,13 +157,14 @@ class TagBackfillTest(unittest.TestCase):
         result = tagging.backfill_tags(apply=False)
         self.assertEqual(result["planned_count"], 1)
         self.assertEqual(result["updated_count"], 0)
-        self.assertEqual(self._row(), ("", "synced"))
+        self.assertEqual(self._row(), ("", "synced", ""))
 
     def test_apply_updates_tags_and_sync_status(self):
         result = tagging.backfill_tags(apply=True)
-        tags, sync_status = self._row()
+        tags, sync_status, tags_text = self._row()
         self.assertEqual(result["updated_count"], 1)
         self.assertIn("通勤", tags.split(","))
+        self.assertIn("通勤", tags_text.split(", "))
         self.assertEqual(sync_status, "pending")
 
 

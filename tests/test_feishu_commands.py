@@ -95,7 +95,21 @@ class FeishuCommandsTest(unittest.TestCase):
     def test_help(self):
         result = feishu_commands.route_command("帮助")
         self.assertEqual(result["action"], "help")
+        self.assertIn("card", result)
+        self.assertIn("快速记账", str(result["card"]))
+        self.assertIn("修改与删除", str(result["card"]))
+        self.assertIn("查账", str(result["card"]))
+        self.assertIn("报告", str(result["card"]))
+        self.assertIn("同步", str(result["card"]))
         self.assertIn("今日账单", result["text"])
+        self.assertIn("生成 2026-06-14 日报", result["text"])
+
+    def test_help_aliases_return_prompt_card(self):
+        for text in ("你能做什么", "提示词", "记账帮助", "使用说明"):
+            result = feishu_commands.route_command(text)
+            self.assertEqual(result["action"], "help")
+            self.assertIn("card", result)
+            self.assertIn("提示词库", str(result["card"]))
 
     @mock.patch.object(feishu_commands, "get_today_summary")
     def test_today(self, summary):
@@ -120,9 +134,17 @@ class FeishuCommandsTest(unittest.TestCase):
             "budget_usage": 10,
             "top_categories": [{"category": "餐饮", "amount": 100}],
         }
-        result = feishu_commands.route_command("本月账单")
+        result = feishu_commands.route_command("本月账单简版")
         self.assertIn("预算使用率：10.0%", result["text"])
         self.assertIn("餐饮", result["text"])
+
+    @mock.patch.object(feishu_commands, "call_deepseek_report")
+    def test_month_income_alias(self, summary):
+        summary.return_value = "# Mock 本月账单"
+        result = feishu_commands.route_command("这个月收入多少")
+        self.assertEqual(result["action"], "monthly_bill_report")
+        self.assertEqual(result["text"], "# Mock 本月账单")
+        summary.assert_called_once()
 
     @mock.patch.object(feishu_commands, "get_recent_transactions")
     def test_recent_n(self, recent):
@@ -132,6 +154,21 @@ class FeishuCommandsTest(unittest.TestCase):
         result = feishu_commands.route_command("最近8笔")
         recent.assert_called_once_with(8, sender_open_id=None, chat_id=None)
         self.assertIn("午饭", result["text"])
+
+    @mock.patch.object(feishu_commands, "get_category_summary")
+    def test_category_month_query(self, category_summary):
+        category_summary.return_value = {
+            "month": "2026-06",
+            "category": "餐饮",
+            "amount": 188.8,
+            "count": 9,
+            "share": 35.5,
+            "is_high": False,
+        }
+        result = feishu_commands.route_command("餐饮这个月花了多少")
+        category_summary.assert_called_once_with("餐饮")
+        self.assertEqual(result["action"], "category")
+        self.assertIn("餐饮支出：¥188.80", result["text"])
 
     @mock.patch.object(feishu_commands, "queue_action")
     def test_natural_language_entry_requires_confirmation(self, queue):
@@ -161,13 +198,15 @@ class FeishuCommandsTest(unittest.TestCase):
         self.assertEqual(result["pending_action_id"], "action-1")
         self.assertIn("card", result)
 
-    def test_sync_dashboard_returns_status_card(self):
-        sync_result = {
-            "success": True,
-            "succeeded": 3,
-            "failed": 0,
-            "message": "同步完成",
-        }
+    def test_sync_status_returns_status_card_without_syncing(self):
+        sync_callback = mock.Mock(
+            return_value={
+                "success": True,
+                "succeeded": 3,
+                "failed": 0,
+                "message": "同步完成",
+            }
+        )
         dashboard = {
             "success": True,
             "configuration": {
@@ -192,21 +231,53 @@ class FeishuCommandsTest(unittest.TestCase):
         }
         result = feishu_commands.route_command(
             "同步状态",
-            sync_callback=lambda: sync_result,
+            sync_callback=sync_callback,
             sync_dashboard_callback=lambda: dashboard,
         )
+        sync_callback.assert_not_called()
         self.assertTrue(result["success"])
-        self.assertEqual(result["action"], "sync")
+        self.assertEqual(result["action"], "sync_status")
         self.assertIn("card", result)
         content = result["card"]["body"]["elements"][0]["content"]
         self.assertIn("本地总流水：** 675", content)
-        self.assertIn("本次同步：** 成功 3，失败 0", content)
+        self.assertIn("本次操作：** 仅检查状态", content)
         self.assertIn("Streamlit", content)
+
+    def test_sync_data_syncs_original_detail_table(self):
+        sync_callback = mock.Mock(
+            return_value={
+                "success": True,
+                "succeeded": 3,
+                "failed": 0,
+                "message": "同步完成",
+            }
+        )
+        dashboard = {
+            "success": True,
+            "configuration": {"bot_ready": True, "bitable_ready": True},
+            "fields": {"success": True, "message": "字段检查通过"},
+            "counts": {
+                "total": 3,
+                "synced": 3,
+                "pending": 0,
+                "failed": 0,
+                "record_id": 3,
+            },
+            "recent_errors": [],
+        }
+        result = feishu_commands.route_command(
+            "同步数据",
+            sync_callback=sync_callback,
+            sync_dashboard_callback=lambda: dashboard,
+        )
+        sync_callback.assert_called_once_with()
+        self.assertEqual(result["action"], "sync")
+        self.assertIn("本次同步：** 成功 3，失败 0", str(result["card"]))
 
     def test_month_finance_analysis_returns_income_expense_balance(self):
         patches = self._analysis_patches()
         with patches[0], patches[1], patches[2], patches[3], patches[4]:
-            result = feishu_commands.route_command("本月财务分析")
+            result = feishu_commands.route_command("看看我的消费结构")
         self.assertTrue(result["success"])
         self.assertEqual(result["action"], "finance_analysis")
         self.assertIn("收入：¥1000.00", result["text"])
@@ -228,7 +299,7 @@ class FeishuCommandsTest(unittest.TestCase):
     def test_tag_analysis_returns_tag_summary(self):
         patches = self._analysis_patches()
         with patches[0], patches[1], patches[2], patches[3], patches[4]:
-            result = feishu_commands.route_command("本月标签分析")
+            result = feishu_commands.route_command("本月标签分析简版")
         self.assertEqual(result["action"], "tag_analysis")
         self.assertIn("Top 5 标签消费场景", result["text"])
         self.assertIn("食堂 ¥120.00", result["text"])
@@ -256,31 +327,76 @@ class FeishuCommandsTest(unittest.TestCase):
         sync_callback = mock.Mock(
             return_value={"success": True, "message": "不应被调用"}
         )
-        result = feishu_commands.route_command(
-            "同步财务看板",
-            sync_callback=sync_callback,
-            parser=lambda text, context=None: {
-                "intent": "unknown",
-                "confidence": 0,
-                "transactions": [],
-                "query": {},
-                "requires_confirmation": False,
-            },
-        )
+        for command in ("同步财务看板", "更新财务看板", "飞书财务看板同步"):
+            result = feishu_commands.route_command(
+                command,
+                sync_callback=sync_callback,
+                parser=lambda text, context=None: {
+                    "intent": "unknown",
+                    "confidence": 0,
+                    "transactions": [],
+                    "query": {},
+                    "requires_confirmation": False,
+                },
+            )
+            self.assertNotEqual(result["action"], "finance_dashboard_sync")
+            self.assertIn("已停用", result["text"])
         sync_callback.assert_not_called()
-        self.assertNotEqual(result["action"], "finance_dashboard_sync")
 
-    @mock.patch.object(feishu_commands, "build_daily_report_card")
-    @mock.patch.object(feishu_commands, "build_daily_report_text")
-    def test_daily_report_uses_mobile_card(self, report_text, report_card):
-        report_text.return_value = "手机端日报摘要"
-        report_card.return_value = {"header": {}, "elements": []}
-        result = feishu_commands.route_command("生成日报")
-        self.assertEqual(result["action"], "report")
-        self.assertEqual(result["text"], "手机端日报摘要")
-        self.assertEqual(result["card"], report_card.return_value)
-        report_text.assert_called_once_with()
-        report_card.assert_called_once_with()
+    @mock.patch.object(feishu_commands, "call_deepseek_report")
+    def test_daily_report_uses_reporting_markdown(self, report):
+        report.return_value = "# 财务分析报告\n\n日报 Markdown"
+        result = feishu_commands.route_command("生成今日日报")
+        self.assertEqual(result["action"], "daily_report")
+        self.assertEqual(result["text"], "# 财务分析报告\n\n日报 Markdown")
+        self.assertNotIn("card", result)
+        report.assert_called_once()
+        self.assertEqual(report.call_args.args[0], "daily_report")
+
+    @mock.patch.object(feishu_commands, "call_deepseek_report")
+    def test_yesterday_daily_report(self, report):
+        report.return_value = "# 财务分析报告\n\n昨天"
+        result = feishu_commands.route_command("生成昨天日报")
+        self.assertEqual(result["action"], "daily_report")
+        self.assertIn("财务分析报告", result["text"])
+
+    @mock.patch.object(feishu_commands, "build_daily_report_payload")
+    @mock.patch.object(feishu_commands, "call_deepseek_report")
+    def test_date_daily_report(self, report, payload):
+        payload.return_value = {"report_type": "daily_report", "date": "2026-06-14"}
+        report.return_value = "# 财务分析报告\n\n指定日期"
+        result = feishu_commands.route_command("生成 2026-06-14 日报")
+        self.assertEqual(result["action"], "daily_report")
+        payload.assert_called_once_with("2026-06-14")
+        report.assert_called_once()
+
+    @mock.patch.object(feishu_commands, "generate_monthly_report")
+    def test_current_month_report(self, report):
+        report.return_value = "# 记账月报｜2026-06"
+        result = feishu_commands.route_command("生成本月月报")
+        self.assertEqual(result["action"], "monthly_report")
+        self.assertIn("记账月报", result["text"])
+
+    @mock.patch.object(feishu_commands, "generate_monthly_report")
+    def test_specific_month_report(self, report):
+        report.return_value = "# 记账月报｜2026-06"
+        result = feishu_commands.route_command("生成 2026-06 月报")
+        self.assertEqual(result["action"], "monthly_report")
+        report.assert_called_once_with("2026-06")
+
+    @mock.patch.object(feishu_commands, "generate_yearly_report")
+    def test_current_year_report(self, report):
+        report.return_value = "# 记账年报｜2026"
+        result = feishu_commands.route_command("生成今年年报")
+        self.assertEqual(result["action"], "yearly_report")
+        self.assertIn("记账年报", result["text"])
+
+    @mock.patch.object(feishu_commands, "generate_yearly_report")
+    def test_specific_year_report(self, report):
+        report.return_value = "# 记账年报｜2026"
+        result = feishu_commands.route_command("生成 2026 年报")
+        self.assertEqual(result["action"], "yearly_report")
+        report.assert_called_once_with("2026")
 
 
 if __name__ == "__main__":
