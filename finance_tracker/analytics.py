@@ -3,9 +3,11 @@ import datetime
 from collections import defaultdict
 
 try:
+    from .advance_payment import has_personal_advance_tag
     from .ledger import MONTHLY_BUDGET, connect, init_db
     from .tagging import clean_tags
 except ImportError:
+    from advance_payment import has_personal_advance_tag
     from ledger import MONTHLY_BUDGET, connect, init_db
     from tagging import clean_tags
 
@@ -25,6 +27,16 @@ CATEGORY_BUDGET_WEIGHTS = {
 
 def get_finance_overview(start_date=None, end_date=None):
     rows = _load_active_transactions(start_date, end_date)
+    advance_rows = _load_active_transactions(
+        start_date,
+        end_date,
+        include_personal_advance=True,
+    )
+    balance_rows = _load_active_transactions(
+        end_date=end_date or datetime.date.today(),
+        include_personal_advance=True,
+    )
+    personal_advance = _personal_advance_summary(advance_rows, balance_rows)
     income_rows = [row for row in rows if row["type"] == "收入"]
     expense_rows = [row for row in rows if row["type"] == "支出"]
     total_income = _sum_amount(income_rows)
@@ -61,6 +73,7 @@ def get_finance_overview(start_date=None, end_date=None):
         "current_month_expense": _money(month_expense),
         "current_month_balance": _money(month_income - month_expense),
         "today_expense": _money(today_expense),
+        "personal_advance": personal_advance,
     }
 
 
@@ -320,7 +333,40 @@ def generate_finance_insights(month=None):
     }
 
 
-def _load_active_transactions(start_date=None, end_date=None):
+def _personal_advance_summary(rows, balance_rows=None):
+    advance_rows = [
+        row for row in rows
+        if has_personal_advance_tag(row.get("tags"))
+    ]
+    balance_advance_rows = [
+        row for row in (balance_rows if balance_rows is not None else advance_rows)
+        if has_personal_advance_tag(row.get("tags"))
+    ]
+    expense_rows = [row for row in advance_rows if row["type"] == "支出"]
+    reimbursement_rows = [row for row in advance_rows if row["type"] == "收入"]
+    balance_expense_rows = [
+        row for row in balance_advance_rows if row["type"] == "支出"
+    ]
+    balance_reimbursement_rows = [
+        row for row in balance_advance_rows if row["type"] == "收入"
+    ]
+    expense = _sum_amount(expense_rows)
+    reimbursement = _sum_amount(reimbursement_rows)
+    current_balance = _sum_amount(balance_expense_rows) - _sum_amount(
+        balance_reimbursement_rows
+    )
+    return {
+        "advance_expense": _money(expense),
+        "advance_reimbursement": _money(reimbursement),
+        "advance_balance": _money(expense - reimbursement),
+        "current_balance": _money(current_balance),
+        "transaction_count": len(advance_rows),
+        "advance_expense_count": len(expense_rows),
+        "advance_reimbursement_count": len(reimbursement_rows),
+    }
+
+
+def _load_active_transactions(start_date=None, end_date=None, include_personal_advance=False):
     init_db()
     conditions = ["status = 'active'"]
     params = []
@@ -349,20 +395,21 @@ def _load_active_transactions(start_date=None, end_date=None):
             date_value = _as_date(row[1]).isoformat()
         except (TypeError, ValueError):
             continue
-        result.append(
-            {
-                "id": int(row[0] or 0),
-                "date": date_value,
-                "month": date_value[:7],
-                "type": str(row[2] or "支出"),
-                "category": str(row[3] or "其他"),
-                "amount": float(row[4] or 0),
-                "description": str(row[5] or ""),
-                "tags": str(row[6] or ""),
-                "is_need": int(bool(row[7])),
-                "is_fixed": int(bool(row[8])),
-            }
-        )
+        item = {
+            "id": int(row[0] or 0),
+            "date": date_value,
+            "month": date_value[:7],
+            "type": str(row[2] or "支出"),
+            "category": str(row[3] or "其他"),
+            "amount": float(row[4] or 0),
+            "description": str(row[5] or ""),
+            "tags": str(row[6] or ""),
+            "is_need": int(bool(row[7])),
+            "is_fixed": int(bool(row[8])),
+        }
+        if not include_personal_advance and has_personal_advance_tag(item.get("tags")):
+            continue
+        result.append(item)
     return result
 
 

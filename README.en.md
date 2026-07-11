@@ -45,6 +45,7 @@ Finance Tracker Pro is designed around a simpler workflow:
 - **Analyze from your computer**: use the Streamlit dashboard to review categories, trends, budgets, and reports.
 - **Receive daily feedback**: generate daily summaries automatically.
 - **Own your data**: keep the SQLite database and sensitive configuration locally.
+- **Use a two-layer Bitable model**: transaction facts explain spending structure while daily snapshots power MTD/YTD metrics.
 
 ---
 
@@ -60,9 +61,20 @@ Finance Tracker Pro is designed around a simpler workflow:
 | SQLite storage | Store the account book locally |
 | Email reports | Generate and send daily finance summaries by email |
 | Feishu reports | Push daily reports to Feishu conversations |
-| Bitable sync | Sync transaction records one-way to Feishu Bitable |
-| Scheduler | Run automated reports, sync tasks, and background services |
+| Personal advance accounting | Track advances, reimbursements, and outstanding balance separately from ordinary finances |
+| Bitable sync | Sync transaction facts and daily metric snapshots for MTD/YTD, rolling averages, and budget pacing |
+| Dashboard-safe measures | Use additive income, expense, need/want, and fixed/variable fields without rebuilding filters |
+| Non-blocking incremental sync | Queue, claim, retry, and recover sync jobs without delaying user-facing bookkeeping replies |
+| Scheduler | Run automated reports, daily metric snapshots, sync tasks, and background services |
 | Privacy protection | Keep `.env`, database files, logs, exports, and backups out of Git |
+
+### Latest Progress
+
+- Added a two-layer Feishu Bitable model: transaction facts plus one daily metric snapshot per calendar day.
+- Added MTD/YTD income, expense, net, daily/monthly averages, savings rates, budget pacing, and projected month-end spending.
+- Excluded personal advances from ordinary income, expense, budget, category, tag, and trend metrics while reporting them separately across Streamlit, email, Feishu, and DeepSeek reports.
+- Added sync-job claiming and stale-job recovery to reduce duplicate processing across background workers.
+- Added configurable output-token limits for AI parsing and DeepSeek reports.
 
 ---
 
@@ -95,7 +107,8 @@ flowchart LR
         J[Streamlit analytics]
         K[Email daily report]
         L[Feishu daily report]
-        M[Feishu Bitable]
+        M1[Feishu transaction facts]
+        M2[Feishu daily metrics]
     end
 
     A --> D
@@ -111,7 +124,8 @@ flowchart LR
     I --> J
     I --> K
     I --> L
-    I --> M
+    I --> M1
+    I --> M2
 ```
 
 ---
@@ -206,6 +220,7 @@ Documentation:
 
 - [Feishu bot setup guide](docs/feishu_setup.md)
 - [Feishu Bitable setup guide](docs/feishu_bitable_setup.md)
+- [Feishu finance dashboard design](docs/feishu_dashboard_design.md)
 
 ---
 
@@ -247,6 +262,18 @@ $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
 .\stop_services.bat    # Stop all services
 ```
 
+### Feishu Dashboard Data
+
+```powershell
+# Create and backfill dashboard-safe fields in the transaction table
+.\.venv\Scripts\python.exe -m finance_tracker.bitable_sync --sync-dashboard-fields
+
+# Create or refresh daily MTD/YTD metric snapshots
+.\.venv\Scripts\python.exe -m finance_tracker.bitable_sync --sync-dashboard-daily
+```
+
+Normal create, update, and delete operations refresh affected dates incrementally. These commands are mainly for first-time setup or manual repair.
+
 ### Startup Task
 
 ```powershell
@@ -270,6 +297,8 @@ finance_tracker/
   account_ops.py            # CLI utilities
   service_runner.py         # Process management
   ai_parser.py              # DeepSeek natural language parser
+  advance_payment.py        # Personal-advance classification and balance logic
+  dashboard_metrics.py      # Daily MTD/YTD dashboard snapshots
   transaction_service.py    # Transaction parsing, validation, and operations
   feishu_bot.py             # Feishu long-connection bot entrypoint
   feishu_client.py          # Feishu Open API wrapper
@@ -288,6 +317,7 @@ scripts/
 docs/
   feishu_setup.md               # Feishu bot setup guide
   feishu_bitable_setup.md       # Feishu Bitable setup guide
+  feishu_dashboard_design.md    # Dashboard metric definitions and layout guide
 ```
 
 ---
@@ -334,8 +364,9 @@ Yes. The project provides scripts for starting services and installing a Windows
 
 ## Roadmap
 
-- [ ] Enhanced Feishu custom menu
-- [ ] Feishu BI dashboard
+- [x] Enhanced Feishu custom menu
+- [x] Feishu BI two-layer model and MTD/YTD metrics
+- [x] Personal advance accounting
 - [ ] Monthly budget alerts
 - [ ] Bill import workflow
 - [ ] Improved data backup and restore

@@ -83,6 +83,18 @@ class TagGenerationTest(unittest.TestCase):
             "2026海南旅游",
         )
 
+    def test_advance_payment_keyword_adds_personal_advance_tag(self):
+        self.assertTagsContain(
+            {
+                "date": "2026-07-09",
+                "type": "支出",
+                "category": "其他",
+                "amount": 45,
+                "description": "垫付标书费用",
+            },
+            "个人垫付",
+        )
+
     def test_ai_tags_are_kept_and_local_tags_are_merged(self):
         tags = tagging.generate_tags(
             {

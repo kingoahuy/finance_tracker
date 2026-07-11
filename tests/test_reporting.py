@@ -3,7 +3,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from finance_tracker import ledger, reporting
+import pandas as pd
+
+from finance_tracker import email_service, ledger, reporting
 
 
 class ReportingPayloadTest(unittest.TestCase):
@@ -140,6 +142,74 @@ class ReportingPayloadTest(unittest.TestCase):
             "已删除流水不应统计",
             [row["description"] for row in payload["top_expenses"]],
         )
+
+    def test_payloads_exclude_personal_advance_and_report_it_separately(self):
+        self._seed()
+        self._insert(
+            "2026-06-14",
+            "支出",
+            "其他",
+            45,
+            "垫付标书费用",
+            "个人垫付,标书",
+        )
+        self._insert(
+            "2026-06-15",
+            "收入",
+            "报销",
+            10,
+            "收到垫付回款",
+            "个人垫付",
+        )
+
+        monthly = reporting.build_monthly_bill_payload("2026-06")
+        daily = reporting.build_daily_report_payload("2026-06-14")
+
+        self.assertEqual(monthly["overview"]["expense"], 64.5)
+        self.assertEqual(monthly["overview"]["income"], 20000.0)
+        self.assertEqual(monthly["personal_advance"]["advance_expense"], 45.0)
+        self.assertEqual(monthly["personal_advance"]["advance_reimbursement"], 10.0)
+        self.assertEqual(monthly["personal_advance"]["current_balance"], 35.0)
+        self.assertNotIn(
+            "个人垫付",
+            [row["tag"] for row in monthly["top_tags"]],
+        )
+
+        self.assertEqual(daily["overview"]["expense"], 64.5)
+        self.assertEqual(daily["personal_advance"]["advance_expense"], 45.0)
+        self.assertEqual(daily["personal_advance"]["current_balance"], 45.0)
+
+    def test_web_daily_report_excludes_personal_advance_from_key_metrics(self):
+        df = pd.DataFrame(
+            [
+                {
+                    "date": "2026-06-14",
+                    "type": "支出",
+                    "category": "餐饮",
+                    "amount": 10.0,
+                    "description": "早餐",
+                    "tags": "早餐",
+                },
+                {
+                    "date": "2026-06-14",
+                    "type": "支出",
+                    "category": "其他",
+                    "amount": 45.0,
+                    "description": "垫付标书费用",
+                    "tags": "个人垫付,标书",
+                },
+            ]
+        )
+
+        markdown = email_service.generate_report_content(
+            df,
+            pd.Timestamp("2026-06-14").date(),
+        )
+
+        self.assertIn("| 今日支出 | ¥10.00 |", markdown)
+        self.assertIn("| 本月累计支出 | ¥10.00 |", markdown)
+        self.assertIn("| 今日垫付支出 | ¥45.00 |", markdown)
+        self.assertIn("垫付标书费用", markdown)
 
     def test_tags_are_split_and_summarized(self):
         self._seed()

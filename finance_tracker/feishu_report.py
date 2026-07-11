@@ -18,6 +18,10 @@ def build_daily_report_card(target_date=None):
         or "暂无支出"
     )
     transaction_lines = _today_transaction_lines(today["transactions"])
+    advance_lines = _personal_advance_card_text(
+        today.get("personal_advance"),
+        month.get("personal_advance"),
+    )
     reminder = _spending_reminder(month["budget_usage"])
     return {
         "config": {"wide_screen_mode": False},
@@ -53,6 +57,11 @@ def build_daily_report_card(target_date=None):
             {"tag": "hr"},
             {
                 "tag": "markdown",
+                "content": advance_lines,
+            },
+            {"tag": "hr"},
+            {
+                "tag": "markdown",
                 "content": f"**本月支出前三**\n{top_lines}",
             },
             {"tag": "hr"},
@@ -74,6 +83,10 @@ def build_daily_report_text(target_date=None):
     target_date = target_date or datetime.date.today()
     today = get_today_summary(target_date)
     month = get_month_summary(target_date)
+    advance_text = _personal_advance_text(
+        today.get("personal_advance"),
+        month.get("personal_advance"),
+    )
     return (
         f"财务日报｜{today['date']}\n"
         f"今日：支出 ¥{today['expense']:.2f}，"
@@ -81,6 +94,7 @@ def build_daily_report_text(target_date=None):
         f"本月：支出 ¥{month['expense']:.2f}，"
         f"收入 ¥{month['income']:.2f}，"
         f"结余 ¥{month['balance']:.2f}\n"
+        f"{advance_text}\n"
         f"预算使用率：{month['budget_usage']:.1f}%\n"
         f"{_spending_reminder(month['budget_usage'])}"
     )
@@ -101,6 +115,32 @@ def _today_transaction_lines(records):
     if len(records) > 5:
         lines.append(f"• 另有 {len(records) - 5} 笔，请发送“今日账单”查看")
     return "\n".join(lines)
+
+
+def _personal_advance_card_text(today_advance, month_advance):
+    text = _personal_advance_text(today_advance, month_advance)
+    return f"**个人垫付（单独列示）**\n{text}"
+
+
+def _personal_advance_text(today_advance, month_advance):
+    today_advance = today_advance or {}
+    month_advance = month_advance or {}
+    today_expense = float(today_advance.get("advance_expense") or 0)
+    today_reimbursement = float(today_advance.get("advance_reimbursement") or 0)
+    month_expense = float(month_advance.get("advance_expense") or 0)
+    month_reimbursement = float(month_advance.get("advance_reimbursement") or 0)
+    current_balance = float(
+        month_advance.get(
+            "current_balance",
+            month_advance.get("advance_balance", 0),
+        )
+        or 0
+    )
+    return (
+        f"今日垫付支出 ¥{today_expense:.2f}，回款 ¥{today_reimbursement:.2f}\n"
+        f"本月垫付支出 ¥{month_expense:.2f}，回款 ¥{month_reimbursement:.2f}\n"
+        f"当前垫付余额 ¥{current_balance:.2f}，不计入上方收支"
+    )
 
 
 def _progress_bar(usage):

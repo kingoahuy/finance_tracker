@@ -3,7 +3,7 @@ import re
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 
-DATA_VERSION = "derived-v1"
+DATA_VERSION = "derived-v2"
 WEEKDAYS_CN = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 
 DERIVED_FIELD_SPECS = (
@@ -22,6 +22,14 @@ DERIVED_FIELD_SPECS = (
     {"key": "is_income", "label": "是否收入", "sqlite": "INTEGER DEFAULT 0", "bitable_type": 7},
     {"key": "is_expense", "label": "是否支出", "sqlite": "INTEGER DEFAULT 0", "bitable_type": 7},
     {"key": "is_active", "label": "是否有效", "sqlite": "INTEGER DEFAULT 1", "bitable_type": 7},
+    {"key": "is_personal_advance", "label": "是否个人垫付", "sqlite": "INTEGER DEFAULT 0", "bitable_type": 7},
+    {"key": "dashboard_income_amount", "label": "看板收入", "sqlite": "REAL", "bitable_type": 2},
+    {"key": "dashboard_expense_amount", "label": "看板支出", "sqlite": "REAL", "bitable_type": 2},
+    {"key": "dashboard_net_amount", "label": "看板净额", "sqlite": "REAL", "bitable_type": 2},
+    {"key": "need_expense_amount", "label": "刚需支出", "sqlite": "REAL", "bitable_type": 2},
+    {"key": "want_expense_amount", "label": "非刚需支出", "sqlite": "REAL", "bitable_type": 2},
+    {"key": "fixed_expense_amount", "label": "固定支出", "sqlite": "REAL", "bitable_type": 2},
+    {"key": "variable_expense_amount", "label": "变动支出", "sqlite": "REAL", "bitable_type": 2},
     {"key": "ledger_month", "label": "记账月份", "sqlite": "TEXT", "bitable_type": 1},
     {"key": "data_version", "label": "数据版本", "sqlite": "TEXT", "bitable_type": 1},
 )
@@ -79,6 +87,14 @@ def enrich_transaction_fields(transaction):
 
     is_income = txn_type == "收入"
     is_expense = txn_type == "支出"
+    is_active = status == "active"
+    is_personal_advance = "个人垫付" in tags
+    dashboard_eligible = is_active and not is_personal_advance
+    dashboard_income = amount if dashboard_eligible and is_income else 0.0
+    dashboard_expense = amount if dashboard_eligible and is_expense else 0.0
+    dashboard_net = dashboard_income - dashboard_expense
+    is_need = bool(result.get("is_need"))
+    is_fixed = bool(result.get("is_fixed"))
     result.update(
         {
             "income_amount": amount if is_income else 0.0,
@@ -88,7 +104,15 @@ def enrich_transaction_fields(transaction):
             "tags_text": ", ".join(tags),
             "is_income": 1 if is_income else 0,
             "is_expense": 1 if is_expense else 0,
-            "is_active": 1 if status == "active" else 0,
+            "is_active": 1 if is_active else 0,
+            "is_personal_advance": 1 if is_personal_advance else 0,
+            "dashboard_income_amount": dashboard_income,
+            "dashboard_expense_amount": dashboard_expense,
+            "dashboard_net_amount": dashboard_net,
+            "need_expense_amount": dashboard_expense if is_need else 0.0,
+            "want_expense_amount": dashboard_expense if not is_need else 0.0,
+            "fixed_expense_amount": dashboard_expense if is_fixed else 0.0,
+            "variable_expense_amount": dashboard_expense if not is_fixed else 0.0,
             "data_version": DATA_VERSION,
             "_derived_error": date_error or "",
         }

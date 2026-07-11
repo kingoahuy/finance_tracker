@@ -26,6 +26,7 @@ COMMON_PROMPT_RULES = """
 6. 不输出完整隐私流水。
 7. 数据为空时明确说明暂无数据。
 8. 语气简洁、实用、适合飞书聊天窗口阅读。
+9. data_payload 中普通收入、支出、预算、分类、标签和趋势统计均不含“个人垫付”；如存在 personal_advance，必须单独说明，不得并入普通收支。
 """.strip()
 
 MONTHLY_BILL_PROMPT = (
@@ -91,6 +92,7 @@ def call_deepseek_report(prompt_name: str, data_payload: dict) -> str:
         response = client.chat.completions.create(
             model=config["model"],
             timeout=config["timeout"],
+            max_tokens=config["max_tokens"],
             messages=[
                 {"role": "system", "content": PROMPTS[prompt_name]},
                 {
@@ -140,6 +142,9 @@ def fallback_monthly_bill_markdown(data_payload):
             f"- 结余：{_money_text(overview.get('balance'))}",
             f"- 交易笔数：{_value_text(overview.get('transaction_count'))}",
             "",
+            "## 个人垫付（单独列示）",
+            *_personal_advance_lines(payload.get("personal_advance")),
+            "",
             "## 支出结构",
             *_summary_lines(payload.get("top_categories"), "category"),
             "",
@@ -178,6 +183,9 @@ def fallback_daily_report_markdown(data_payload):
             f"- 结余：{_money_text(overview.get('balance'))}",
             f"- 交易笔数：{_value_text(overview.get('transaction_count'))}",
             "",
+            "## 个人垫付（单独列示）",
+            *_personal_advance_lines(payload.get("personal_advance")),
+            "",
             "## 今日分类支出",
             *_summary_lines(payload.get("category_summary"), "category"),
             "",
@@ -215,6 +223,9 @@ def fallback_monthly_tag_analysis_markdown(data_payload):
             f"- 未打标签：{_value_text(overview.get('untagged_transaction_count'))}",
             f"- 覆盖率：{_percent_text(overview.get('tag_coverage_rate'))}",
             "",
+            "## 个人垫付（单独列示）",
+            *_personal_advance_lines(payload.get("personal_advance")),
+            "",
             "## Top 消费标签",
             *_summary_lines(payload.get("tag_summary"), "tag"),
             "",
@@ -246,6 +257,9 @@ def fallback_monthly_consumption_report_markdown(data_payload):
             f"- 支出：{_money_text(overview.get('expense'))}",
             f"- 结余：{_money_text(overview.get('balance'))}",
             f"- 日均支出：{_money_text(overview.get('daily_avg_expense'))}",
+            "",
+            "## 个人垫付（单独列示）",
+            *_personal_advance_lines(payload.get("personal_advance")),
             "",
             "## 消费结构",
             *_summary_lines(payload.get("category_summary"), "category"),
@@ -281,11 +295,37 @@ def _get_deepseek_config():
         "base_url": os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").strip(),
         "model": os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash").strip(),
         "timeout": max(1, min(int(os.getenv("AI_PARSER_TIMEOUT_SECONDS", "15") or "15"), 60)),
+        "max_tokens": max(
+            300,
+            min(
+                int(os.getenv("DEEPSEEK_REPORT_MAX_TOKENS", "1200") or "1200"),
+                8000,
+            ),
+        ),
     }
 
 
 def _fallback(prompt_name, payload):
     return FALLBACKS[prompt_name](payload)
+
+
+def _personal_advance_lines(advance):
+    advance = advance or {}
+    expense = float(advance.get("advance_expense") or 0)
+    reimbursement = float(advance.get("advance_reimbursement") or 0)
+    period_balance = float(advance.get("advance_balance") or 0)
+    current_balance = float(advance.get("current_balance", period_balance) or 0)
+    count = int(advance.get("transaction_count") or 0)
+    if not count and not expense and not reimbursement and not current_balance:
+        return ["- 暂无个人垫付记录。"]
+    return [
+        "- 以下金额不计入普通收入、支出、预算和消费标签统计。",
+        f"- 本期垫付支出：{_money_text(expense)}",
+        f"- 本期垫付回款：{_money_text(reimbursement)}",
+        f"- 本期垫付净额：{_money_text(period_balance)}",
+        f"- 当前垫付余额：{_money_text(current_balance)}",
+        f"- 本期垫付笔数：{_value_text(count)}",
+    ]
 
 
 def _summary_lines(rows, name_key):

@@ -15,6 +15,7 @@ if str(MODULE_DIR) not in sys.path:
 
 from config import save_env_values
 from derived_fields import DERIVED_FIELD_LABELS, DERIVED_FIELD_SPECS
+from advance_payment import actual_transactions_df, personal_advance_balance
 from bitable_sync import (
     check_bitable,
     full_sync,
@@ -29,6 +30,7 @@ from email_service import generate_report_content, get_mail_config_status
 from feishu_config import get_feishu_config_status
 from ledger import (
     CATEGORIES,
+    DB_FILE,
     MONTHLY_BUDGET,
     add_email_job,
     delete_job,
@@ -78,6 +80,20 @@ st.markdown("""
 # ================= 2. 本地账本操作 =================
 def load_data():
     return load_transactions()
+
+
+def data_editor_key_for(df):
+    if df.empty:
+        return "data_editor_empty"
+    parts = [str(len(df))]
+    if "_rowid" in df.columns:
+        rowids = pd.to_numeric(df["_rowid"], errors="coerce")
+        parts.append(str(int(rowids.max())) if not rowids.empty and pd.notna(rowids.max()) else "0")
+    for column in ("updated_at", "created_at", "sync_status"):
+        if column in df.columns:
+            values = df[column].fillna("").astype(str)
+            parts.append(values.max() if not values.empty else "")
+    return "data_editor_" + "_".join(parts)
 
 
 # ================= 3. UI 组件 =================
@@ -211,12 +227,14 @@ def main():
 
             this_month_mask = (df['date'].dt.year == sel_year) & (df['date'].dt.month == sel_month)
             this_month = df[this_month_mask]
+            actual_this_month = actual_transactions_df(this_month)
+            advance_metrics = personal_advance_balance(df)
 
-            inc = this_month[this_month['type'] == '收入']['amount'].sum()
-            exp = this_month[this_month['type'] == '支出']['amount'].sum()
+            inc = actual_this_month[actual_this_month['type'] == '收入']['amount'].sum()
+            exp = actual_this_month[actual_this_month['type'] == '支出']['amount'].sum()
             bal = inc - exp
 
-            c1, c2, c3 = st.columns(3)
+            c1, c2, c3, c4 = st.columns(4)
             c1.markdown(
                 f"""<div class="css-card"><div style="color:#888;font-size:12px">{sel_month}月收入</div><div class="text-inc" style="font-size:20px">+{inc:,.0f}</div></div>""",
                 unsafe_allow_html=True)
@@ -226,6 +244,9 @@ def main():
             bal_col = "text-bal" if bal >= 0 else "text-exp"
             c3.markdown(
                 f"""<div class="css-card"><div style="color:#888;font-size:12px">{sel_month}月结余</div><div class="{bal_col}" style="font-size:20px">{bal:+,.0f}</div></div>""",
+                unsafe_allow_html=True)
+            c4.markdown(
+                f"""<div class="css-card"><div style="color:#888;font-size:12px">个人垫付余额</div><div class="text-bal" style="font-size:20px">¥{advance_metrics['advance_balance']:,.0f}</div></div>""",
                 unsafe_allow_html=True)
 
             # 🔥🔥🔥 新增：收支趋势折线图 (带年份、月份筛选器) 🔥🔥🔥
@@ -247,13 +268,15 @@ def main():
             trend_df = pd.DataFrame()
             if trend_month == "全年":
                 # 筛选某年，展示当年的月度情况
-                trend_df = df[df['date'].dt.year == trend_year].copy()
+                trend_df = actual_transactions_df(df[df['date'].dt.year == trend_year]).copy()
                 if not trend_df.empty:
                     trend_df['sort_key'] = trend_df['date'].dt.month
                     trend_df['period'] = trend_df['sort_key'].astype(str) + "月"
             else:
                 # 筛选某年某月，展示当月每日的情况
-                trend_df = df[(df['date'].dt.year == trend_year) & (df['date'].dt.month == trend_month)].copy()
+                trend_df = actual_transactions_df(
+                    df[(df['date'].dt.year == trend_year) & (df['date'].dt.month == trend_month)]
+                ).copy()
                 if not trend_df.empty:
                     trend_df['sort_key'] = trend_df['date'].dt.day
                     trend_df['period'] = trend_df['sort_key'].astype(str) + "日"
@@ -286,8 +309,8 @@ def main():
                 st.info("所选时间范围内暂无记录")
 
             st.subheader(f"📊 {sel_month}月每日流水")
-            if not this_month[this_month['type'] == '支出'].empty:
-                daily = this_month[this_month['type'] == '支出'].groupby(this_month['date'].dt.day)[
+            if not actual_this_month[actual_this_month['type'] == '支出'].empty:
+                daily = actual_this_month[actual_this_month['type'] == '支出'].groupby(actual_this_month['date'].dt.day)[
                     'amount'].sum().reset_index()
                 daily.columns = ['日', '金额']
                 fig = px.bar(daily, x='日', y='金额', text='金额', color_discrete_sequence=['#EE6C4D'])
@@ -320,11 +343,12 @@ def main():
             with col_b2:
                 b_month = st.selectbox("月份", range(1, 13), index=today.month - 1, key='budget_month')
 
-            render_burndown_chart(df, budget, b_year, b_month)
+            actual_df = actual_transactions_df(df)
+            render_burndown_chart(actual_df, budget, b_year, b_month)
 
-            mask_budget_view = (df['date'].dt.year == b_year) & (df['date'].dt.month == b_month) & (
-                    df['type'] == '支出')
-            exp_df = df[mask_budget_view]
+            mask_budget_view = (actual_df['date'].dt.year == b_year) & (actual_df['date'].dt.month == b_month) & (
+                    actual_df['type'] == '支出')
+            exp_df = actual_df[mask_budget_view]
 
             if not exp_df.empty:
                 st.subheader(f"🛒 {b_month}月消费构成")
@@ -632,6 +656,7 @@ def main():
             "高级字段由系统自动计算，只读显示。"
         )
         manage_df = load_transactions()
+        st.caption(f"当前本地账本：{DB_FILE}；共 {len(manage_df)} 条记录。")
 
         if not manage_df.empty:
             manage_df['tags'] = manage_df['tags'].fillna('')
@@ -702,7 +727,7 @@ def main():
                 num_rows="dynamic",
                 width="stretch",
                 hide_index=True,
-                key="data_editor"
+                key=data_editor_key_for(active_manage_df)
             )
 
             if st.button("💾 保存数据修改", type="secondary"):

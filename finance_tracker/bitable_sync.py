@@ -11,11 +11,18 @@ try:
     from lark_oapi.api.bitable.v1 import (
         AppTableField,
         AppTableRecord,
+        AppTable,
+        BatchCreateAppTableRecordRequest,
+        BatchCreateAppTableRecordRequestBody,
         BatchDeleteAppTableRecordRequest,
         BatchDeleteAppTableRecordRequestBody,
+        BatchUpdateAppTableRecordRequest,
+        BatchUpdateAppTableRecordRequestBody,
         Condition,
         CreateAppTableFieldRequest,
         CreateAppTableRecordRequest,
+        CreateAppTableRequest,
+        CreateAppTableRequestBody,
         DeleteAppTableRequest,
         FilterInfo,
         ListAppTableFieldRequest,
@@ -23,6 +30,7 @@ try:
         ListAppTableRecordRequest,
         SearchAppTableRecordRequest,
         SearchAppTableRecordRequestBody,
+        UpdateAppTableFieldRequest,
         UpdateAppTableRecordRequest,
     )
 except ImportError:
@@ -38,6 +46,15 @@ try:
     from .feishu_client import FeishuClient, response_result
     from .feishu_config import get_feishu_config
     from .ledger import backfill_derived_fields, connect, init_db
+    from .dashboard_metrics import (
+        DAILY_DASHBOARD_BITABLE_TYPES,
+        DAILY_DASHBOARD_FIELD_LABELS,
+        DAILY_DASHBOARD_FIELD_SPECS,
+        DAILY_DASHBOARD_TABLE_NAME,
+        build_daily_dashboard_rows,
+        daily_dashboard_sync_due,
+        mark_daily_dashboard_synced,
+    )
 except ImportError:
     from derived_fields import (
         DERIVED_BITABLE_TYPES,
@@ -48,6 +65,15 @@ except ImportError:
     from feishu_client import FeishuClient, response_result
     from feishu_config import get_feishu_config
     from ledger import backfill_derived_fields, connect, init_db
+    from dashboard_metrics import (
+        DAILY_DASHBOARD_BITABLE_TYPES,
+        DAILY_DASHBOARD_FIELD_LABELS,
+        DAILY_DASHBOARD_FIELD_SPECS,
+        DAILY_DASHBOARD_TABLE_NAME,
+        build_daily_dashboard_rows,
+        daily_dashboard_sync_due,
+        mark_daily_dashboard_synced,
+    )
 
 
 FIELD_MAP = {
@@ -72,6 +98,17 @@ FIELD_MAP = {
     **DERIVED_FIELD_LABELS,
 }
 REQUIRED_FIELDS = tuple(FIELD_MAP.values())
+DASHBOARD_TRANSACTION_KEYS = (
+    "is_personal_advance",
+    "dashboard_income_amount",
+    "dashboard_expense_amount",
+    "dashboard_net_amount",
+    "need_expense_amount",
+    "want_expense_amount",
+    "fixed_expense_amount",
+    "variable_expense_amount",
+    "data_version",
+)
 _FIELD_PREFLIGHT_CACHE = set()
 
 
@@ -140,6 +177,30 @@ def transaction_to_bitable_fields(transaction):
         FIELD_MAP["is_income"]: bool(transaction.get("is_income")),
         FIELD_MAP["is_expense"]: bool(transaction.get("is_expense")),
         FIELD_MAP["is_active"]: bool(transaction.get("is_active")),
+        FIELD_MAP["is_personal_advance"]: bool(
+            transaction.get("is_personal_advance")
+        ),
+        FIELD_MAP["dashboard_income_amount"]: float(
+            transaction.get("dashboard_income_amount") or 0
+        ),
+        FIELD_MAP["dashboard_expense_amount"]: float(
+            transaction.get("dashboard_expense_amount") or 0
+        ),
+        FIELD_MAP["dashboard_net_amount"]: float(
+            transaction.get("dashboard_net_amount") or 0
+        ),
+        FIELD_MAP["need_expense_amount"]: float(
+            transaction.get("need_expense_amount") or 0
+        ),
+        FIELD_MAP["want_expense_amount"]: float(
+            transaction.get("want_expense_amount") or 0
+        ),
+        FIELD_MAP["fixed_expense_amount"]: float(
+            transaction.get("fixed_expense_amount") or 0
+        ),
+        FIELD_MAP["variable_expense_amount"]: float(
+            transaction.get("variable_expense_amount") or 0
+        ),
         FIELD_MAP["ledger_month"]: str(transaction.get("ledger_month") or ""),
         FIELD_MAP["data_version"]: str(transaction.get("data_version") or ""),
     }
@@ -386,6 +447,7 @@ class BitableSyncService:
                     "field_id": str(getattr(item, "field_id", "") or ""),
                     "type": getattr(item, "type", None),
                     "ui_type": str(getattr(item, "ui_type", "") or ""),
+                    "is_primary": bool(getattr(item, "is_primary", False)),
                 }
                 for item in items
             )
@@ -417,6 +479,105 @@ class BitableSyncService:
         )
         result.pop("data", None)
         result["field_name"] = str(field_name)
+        return result
+
+    def update_field(self, field_id, field_name, field_type, table_id=None):
+        table_id = table_id or self.config.bitable_table_id
+        field = (
+            AppTableField.builder()
+            .field_name(str(field_name))
+            .type(int(field_type))
+            .build()
+        )
+        request = (
+            UpdateAppTableFieldRequest.builder()
+            .app_token(self.config.bitable_app_token)
+            .table_id(str(table_id))
+            .field_id(str(field_id))
+            .request_body(field)
+            .build()
+        )
+        result = _sanitize_api_result(
+            response_result(
+                self.client.bitable.v1.app_table_field.update(request)
+            )
+        )
+        result.pop("data", None)
+        result["field_name"] = str(field_name)
+        return result
+
+    def create_table(self, table_name):
+        table = AppTable.builder().name(str(table_name)).build()
+        body = CreateAppTableRequestBody.builder().table(table).build()
+        request = (
+            CreateAppTableRequest.builder()
+            .app_token(self.config.bitable_app_token)
+            .request_body(body)
+            .build()
+        )
+        result = _sanitize_api_result(
+            response_result(self.client.bitable.v1.app_table.create(request))
+        )
+        data = result.get("data")
+        created = getattr(data, "table", None)
+        result["table_id"] = str(getattr(created, "table_id", "") or "")
+        result["table_name"] = str(getattr(created, "name", "") or table_name)
+        result.pop("data", None)
+        return result
+
+    def batch_create_records(self, table_id, fields_list):
+        records = [
+            AppTableRecord.builder().fields(fields).build()
+            for fields in fields_list
+        ]
+        body = (
+            BatchCreateAppTableRecordRequestBody.builder()
+            .records(records)
+            .build()
+        )
+        request = (
+            BatchCreateAppTableRecordRequest.builder()
+            .app_token(self.config.bitable_app_token)
+            .table_id(str(table_id))
+            .request_body(body)
+            .build()
+        )
+        result = _sanitize_api_result(
+            response_result(
+                self.client.bitable.v1.app_table_record.batch_create(request)
+            )
+        )
+        result.pop("data", None)
+        result["record_count"] = len(records)
+        return result
+
+    def batch_update_records(self, table_id, records_to_update):
+        records = [
+            AppTableRecord.builder()
+            .record_id(str(record_id))
+            .fields(fields)
+            .build()
+            for record_id, fields in records_to_update
+        ]
+        body = (
+            BatchUpdateAppTableRecordRequestBody.builder()
+            .records(records)
+            .build()
+        )
+        request = (
+            BatchUpdateAppTableRecordRequest.builder()
+            .app_token(self.config.bitable_app_token)
+            .table_id(str(table_id))
+            .request_body(body)
+            .build()
+        )
+        result = _sanitize_api_result(
+            response_result(
+                self.client.bitable.v1.app_table_record.batch_update(request)
+            )
+        )
+        result.pop("data", None)
+        result["record_count"] = len(records)
         return result
 
     def list_tables(self):
@@ -948,7 +1109,8 @@ def sync_transaction(
         outbox = conn.execute(
             """
             SELECT id, operation FROM sync_outbox
-            WHERE transaction_uid = ? AND status IN ('pending', 'failed')
+            WHERE transaction_uid = ?
+              AND status IN ('pending', 'failed', 'processing')
             ORDER BY id ASC LIMIT 1
             """,
             (transaction_uid,),
@@ -965,20 +1127,17 @@ def sync_transaction(
                 "log_id": "",
             }
         else:
-            local_record_id = transaction.get("feishu_record_id")
             search_result = _search_record_result(
                 service,
                 transaction_uid,
             )
+            record_id = search_result.get("record_id")
             _emit_trace(
                 trace_callback,
                 "search",
                 {
                     **search_result,
-                    "record_id_found": bool(
-                        search_result.get("record_id")
-                        or local_record_id
-                    ),
+                    "record_id_found": bool(record_id),
                 },
             )
             if not search_result.get("success"):
@@ -994,9 +1153,6 @@ def sync_transaction(
                         "log_id": search_result.get("log_id", ""),
                     }
                 )
-            record_id = (
-                search_result.get("record_id") or local_record_id
-            )
             result = (
                 service.update_record(record_id, transaction)
                 if record_id
@@ -1048,23 +1204,13 @@ def sync_transaction(
 def sync_pending_transactions(limit=100, service=None, progress_callback=None):
     init_db()
     config = service.config if service is not None else get_feishu_config()
-    with connect() as conn:
-        rows = conn.execute(
-            """
-            SELECT outbox.transaction_uid, outbox.operation
-            FROM sync_outbox AS outbox
-            INNER JOIN (
-                SELECT transaction_uid, MAX(id) AS latest_id
-                FROM sync_outbox
-                WHERE status IN ('pending', 'failed') AND retry_count < ?
-                GROUP BY transaction_uid
-            ) AS latest ON latest.latest_id = outbox.id
-            ORDER BY outbox.id ASC LIMIT ?
-            """,
-            (config.sync_retry_limit, int(limit)),
-        ).fetchall()
+    rows = _pending_sync_rows(limit, config.sync_retry_limit)
     if not rows:
-        return _sync_summary("没有待同步任务", [])
+        summary = _sync_summary("没有待同步任务", [])
+        if config.bitable_ready and config.bitable_sync_enabled:
+            dashboard = sync_daily_dashboard_if_due(service=service)
+            return _attach_dashboard_result(summary, dashboard)
+        return summary
     disabled = _sync_disabled_result(config)
     if disabled:
         error = _format_api_error(disabled)
@@ -1088,13 +1234,91 @@ def sync_pending_transactions(limit=100, service=None, progress_callback=None):
             preflight=preflight,
             processed=len(rows),
         )
+    rows = _claim_sync_rows(limit, config.sync_retry_limit)
+    if not rows:
+        return _sync_summary("No sync jobs claimed.", [])
     service = service or BitableSyncService(config=config)
     results = _sync_rows(
         rows,
         service,
         progress_callback=progress_callback,
     )
-    return _sync_summary("同步完成", results)
+    summary = _sync_summary("同步完成", results)
+    dashboard = sync_daily_dashboard(
+        start_date=_affected_start_date(rows),
+        service=service,
+    )
+    return _attach_dashboard_result(summary, dashboard)
+
+
+def _pending_sync_rows(limit, retry_limit):
+    _reset_stale_processing_syncs()
+    with connect() as conn:
+        return conn.execute(
+            """
+            SELECT outbox.transaction_uid, outbox.operation
+            FROM sync_outbox AS outbox
+            INNER JOIN (
+                SELECT transaction_uid, MAX(id) AS latest_id
+                FROM sync_outbox
+                WHERE status IN ('pending', 'failed') AND retry_count < ?
+                GROUP BY transaction_uid
+            ) AS latest ON latest.latest_id = outbox.id
+            ORDER BY outbox.id ASC LIMIT ?
+            """,
+            (int(retry_limit), int(limit)),
+        ).fetchall()
+
+
+def _claim_sync_rows(limit, retry_limit):
+    init_db()
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        rows = conn.execute(
+            """
+            SELECT outbox.id, outbox.transaction_uid, outbox.operation
+            FROM sync_outbox AS outbox
+            INNER JOIN (
+                SELECT transaction_uid, MAX(id) AS latest_id
+                FROM sync_outbox
+                WHERE status IN ('pending', 'failed') AND retry_count < ?
+                GROUP BY transaction_uid
+            ) AS latest ON latest.latest_id = outbox.id
+            ORDER BY outbox.id ASC LIMIT ?
+            """,
+            (int(retry_limit), int(limit)),
+        ).fetchall()
+        claimed = []
+        for outbox_id, transaction_uid, operation in rows:
+            cursor = conn.execute(
+                """
+                UPDATE sync_outbox
+                SET status = 'processing',
+                    last_error = '',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND status IN ('pending', 'failed')
+                """,
+                (outbox_id,),
+            )
+            if cursor.rowcount == 1:
+                claimed.append((transaction_uid, operation))
+        return claimed
+
+
+def _reset_stale_processing_syncs(minutes=10):
+    with connect() as conn:
+        conn.execute(
+            """
+            UPDATE sync_outbox
+            SET status = 'failed',
+                retry_count = retry_count + 1,
+                last_error = 'sync worker timed out before finishing',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE status = 'processing'
+              AND updated_at < datetime('now', ?)
+            """,
+            (f"-{int(minutes)} minutes",),
+        )
 
 
 def full_sync(service=None, progress_callback=None):
@@ -1147,7 +1371,9 @@ def full_sync(service=None, progress_callback=None):
         service,
         progress_callback=progress_callback,
     )
-    return _sync_summary("全量同步完成", results)
+    summary = _sync_summary("全量同步完成", results)
+    dashboard = sync_daily_dashboard(service=service)
+    return _attach_dashboard_result(summary, dashboard)
 
 
 def sync_one_pending(service=None):
@@ -1593,6 +1819,374 @@ def cleanup_test_records(apply=False, service=None):
     return result
 
 
+def dashboard_row_to_bitable_fields(row):
+    fields = {}
+    for spec in DAILY_DASHBOARD_FIELD_SPECS:
+        key = spec["key"]
+        label = spec["label"]
+        value = row.get(key)
+        if spec["bitable_type"] == 5:
+            if isinstance(value, datetime.datetime):
+                value = _datetime_to_milliseconds(value)
+            else:
+                value = _date_to_milliseconds(value)
+        elif spec["bitable_type"] == 7:
+            value = bool(value)
+        elif spec["bitable_type"] == 2:
+            value = float(value or 0)
+        else:
+            value = str(value or "")
+        fields[label] = value
+    return fields
+
+
+def ensure_daily_dashboard_table(service=None):
+    """Create or validate the compact daily snapshot table used by dashboards."""
+    config = service.config if service is not None else get_feishu_config()
+    disabled = _sync_disabled_result(config)
+    if disabled:
+        return {**disabled, "table_id": "", "created_fields": []}
+    service = service or BitableSyncService(config=config)
+    tables_result = service.list_tables()
+    if not tables_result.get("success"):
+        return {**_one_result(tables_result), "table_id": "", "created_fields": []}
+    matches = [
+        table
+        for table in tables_result.get("tables") or []
+        if str(table.get("name") or "").strip() == DAILY_DASHBOARD_TABLE_NAME
+    ]
+    created_table = False
+    if matches:
+        table_id = str(matches[0].get("table_id") or "")
+    else:
+        create_result = service.create_table(DAILY_DASHBOARD_TABLE_NAME)
+        if not create_result.get("success"):
+            return {
+                **_one_result(create_result),
+                "table_id": "",
+                "created_fields": [],
+            }
+        created_table = True
+        table_id = str(create_result.get("table_id") or "")
+        if not table_id:
+            tables_result = service.list_tables()
+            matches = [
+                table
+                for table in tables_result.get("tables") or []
+                if str(table.get("name") or "").strip()
+                == DAILY_DASHBOARD_TABLE_NAME
+            ]
+            table_id = str(matches[0].get("table_id") or "") if matches else ""
+    if not table_id:
+        return {
+            "success": False,
+            "code": -1,
+            "message": "看板日指标表已创建，但未能读取 table_id。",
+            "log_id": "",
+            "table_id": "",
+            "created_fields": [],
+        }
+
+    fields_result = service.list_fields(table_id=table_id)
+    if not fields_result.get("success"):
+        return {
+            **_one_result(fields_result),
+            "table_id": table_id,
+            "created_fields": [],
+        }
+    existing = {
+        item.get("field_name"): item
+        for item in fields_result.get("fields") or []
+        if item.get("field_name")
+    }
+    primary_label = DAILY_DASHBOARD_FIELD_LABELS["metric_date_key"]
+    renamed_primary = False
+    if primary_label not in existing:
+        primary = next(
+            (
+                item
+                for item in fields_result.get("fields") or []
+                if item.get("is_primary")
+            ),
+            None,
+        )
+        if primary:
+            rename_result = service.update_field(
+                primary["field_id"],
+                primary_label,
+                1,
+                table_id=table_id,
+            )
+            if not rename_result.get("success"):
+                return {
+                    **_one_result(rename_result),
+                    "table_id": table_id,
+                    "created_fields": [],
+                }
+            renamed_primary = True
+            existing[primary_label] = {
+                **primary,
+                "field_name": primary_label,
+                "type": 1,
+            }
+
+    created_fields = []
+    invalid_field_types = []
+    for field_name, expected_type in DAILY_DASHBOARD_BITABLE_TYPES.items():
+        field = existing.get(field_name)
+        if field:
+            if not _field_type_matches(field, expected_type):
+                invalid_field_types.append(
+                    {
+                        "field": field_name,
+                        "expected": _field_type_name(expected_type),
+                        "actual": _field_type_name(field.get("type")),
+                    }
+                )
+            continue
+        create_result = service.create_field(
+            field_name,
+            expected_type,
+            table_id=table_id,
+        )
+        if not create_result.get("success"):
+            return {
+                **_one_result(create_result),
+                "table_id": table_id,
+                "created_fields": created_fields,
+                "invalid_field_types": invalid_field_types,
+            }
+        created_fields.append(field_name)
+    if invalid_field_types:
+        return {
+            "success": False,
+            "code": -1,
+            "message": "看板日指标表存在字段类型不匹配。",
+            "log_id": "",
+            "table_id": table_id,
+            "created_fields": created_fields,
+            "invalid_field_types": invalid_field_types,
+        }
+    return {
+        "success": True,
+        "code": 0,
+        "message": "看板日指标表字段已就绪。",
+        "log_id": str(fields_result.get("log_id") or ""),
+        "table_id": table_id,
+        "table_name": DAILY_DASHBOARD_TABLE_NAME,
+        "created_table": created_table,
+        "renamed_primary": renamed_primary,
+        "created_fields": created_fields,
+        "field_count": len(DAILY_DASHBOARD_FIELD_SPECS),
+        "invalid_field_types": [],
+    }
+
+
+def sync_daily_dashboard(start_date=None, as_of_date=None, service=None):
+    """Reconcile daily metric snapshots to Feishu, optionally from one date."""
+    config = service.config if service is not None else get_feishu_config()
+    disabled = _sync_disabled_result(config)
+    if disabled:
+        return {
+            **disabled,
+            "table_name": DAILY_DASHBOARD_TABLE_NAME,
+            "created": 0,
+            "updated": 0,
+        }
+    service = service or BitableSyncService(config=config)
+    ensure_result = ensure_daily_dashboard_table(service=service)
+    if not ensure_result.get("success"):
+        return {
+            **ensure_result,
+            "table_name": DAILY_DASHBOARD_TABLE_NAME,
+            "created": 0,
+            "updated": 0,
+        }
+    table_id = ensure_result["table_id"]
+    rows = build_daily_dashboard_rows(as_of_date=as_of_date)
+    if start_date:
+        start = _as_iso_date(start_date)
+        rows = [row for row in rows if row["metric_date_key"] >= start]
+
+    remote_result = service.list_records(table_id=table_id)
+    if not remote_result.get("success"):
+        return {
+            **_one_result(remote_result),
+            "table_id": table_id,
+            "table_name": DAILY_DASHBOARD_TABLE_NAME,
+            "created": 0,
+            "updated": 0,
+        }
+    primary_label = DAILY_DASHBOARD_FIELD_LABELS["metric_date_key"]
+    existing = {}
+    duplicate_keys = []
+    for record in remote_result.get("records") or []:
+        key = _field_text(record.get("fields", {}).get(primary_label))
+        if not key:
+            continue
+        if key in existing:
+            duplicate_keys.append(key)
+            continue
+        existing[key] = record["record_id"]
+
+    create_rows = []
+    update_rows = []
+    for row in rows:
+        fields = dashboard_row_to_bitable_fields(row)
+        record_id = existing.get(row["metric_date_key"])
+        if record_id:
+            update_rows.append((record_id, fields))
+        else:
+            create_rows.append(fields)
+
+    errors = []
+    created = updated = 0
+    for batch in _chunks(create_rows, 500):
+        result = service.batch_create_records(table_id, batch)
+        if result.get("success"):
+            created += len(batch)
+        else:
+            errors.append(_format_api_error(result))
+            break
+    if not errors:
+        for batch in _chunks(update_rows, 500):
+            result = service.batch_update_records(table_id, batch)
+            if result.get("success"):
+                updated += len(batch)
+            else:
+                errors.append(_format_api_error(result))
+                break
+
+    success = not errors
+    if success:
+        mark_daily_dashboard_synced(as_of_date=as_of_date)
+    return {
+        "success": success,
+        "code": 0 if success else -1,
+        "message": (
+            f"看板日指标同步完成：新增 {created}，更新 {updated}。"
+            if success
+            else "看板日指标同步失败：" + "；".join(errors)
+        ),
+        "log_id": str(remote_result.get("log_id") or ""),
+        "table_id": table_id,
+        "table_name": DAILY_DASHBOARD_TABLE_NAME,
+        "metric_date_start": rows[0]["metric_date_key"] if rows else "",
+        "metric_date_end": rows[-1]["metric_date_key"] if rows else "",
+        "processed": len(rows),
+        "created": created,
+        "updated": updated,
+        "duplicate_key_count": len(set(duplicate_keys)),
+        "errors": errors,
+        "layout": ensure_result,
+    }
+
+
+def sync_daily_dashboard_if_due(service=None, as_of_date=None):
+    if not daily_dashboard_sync_due(as_of_date=as_of_date):
+        return {
+            "success": True,
+            "code": 0,
+            "message": "今日看板日指标已经刷新。",
+            "log_id": "",
+            "skipped": True,
+            "created": 0,
+            "updated": 0,
+        }
+    return sync_daily_dashboard(
+        start_date=as_of_date or datetime.date.today(),
+        as_of_date=as_of_date,
+        service=service,
+    )
+
+
+def sync_dashboard_transaction_fields(service=None):
+    """Bulk backfill dashboard-safe additive fields without a slow full sync."""
+    config = service.config if service is not None else get_feishu_config()
+    disabled = _sync_disabled_result(config)
+    if disabled:
+        return {**disabled, "updated": 0}
+    service = service or BitableSyncService(config=config)
+    local_backfill = backfill_derived_fields(apply=True)
+    fields_result = ensure_main_table_fields(service=service)
+    if not fields_result.get("success"):
+        return {
+            **fields_result,
+            "updated": 0,
+            "local_backfill": local_backfill,
+        }
+    with connect() as conn:
+        local_rows = conn.execute(
+            f"""
+            SELECT transaction_uid, {", ".join(DASHBOARD_TRANSACTION_KEYS)}
+            FROM transactions
+            WHERE transaction_uid IS NOT NULL
+              AND TRIM(transaction_uid) <> ''
+            """
+        ).fetchall()
+    local_by_uid = {
+        str(row[0]): dict(zip(DASHBOARD_TRANSACTION_KEYS, row[1:]))
+        for row in local_rows
+    }
+    remote_result = service.list_records(table_id=config.bitable_table_id)
+    if not remote_result.get("success"):
+        return {
+            **_one_result(remote_result),
+            "updated": 0,
+            "local_backfill": local_backfill,
+            "fields": fields_result,
+        }
+    updates = []
+    matched_uids = set()
+    for record in remote_result.get("records") or []:
+        uid = _record_uid(record)
+        local = local_by_uid.get(uid)
+        if not local or uid in matched_uids:
+            continue
+        matched_uids.add(uid)
+        fields = {}
+        for key in DASHBOARD_TRANSACTION_KEYS:
+            value = local.get(key)
+            if key == "is_personal_advance":
+                value = bool(value)
+            elif key != "data_version":
+                value = float(value or 0)
+            else:
+                value = str(value or "")
+            fields[FIELD_MAP[key]] = value
+        updates.append((record["record_id"], fields))
+
+    errors = []
+    updated = 0
+    for batch in _chunks(updates, 500):
+        result = service.batch_update_records(config.bitable_table_id, batch)
+        if result.get("success"):
+            updated += len(batch)
+        else:
+            errors.append(_format_api_error(result))
+            break
+    missing_remote = sorted(set(local_by_uid) - matched_uids)
+    success = not errors
+    return {
+        "success": success,
+        "code": 0 if success else -1,
+        "message": (
+            f"交易底表看板字段回填完成：更新 {updated} 条。"
+            if success
+            else "交易底表看板字段回填失败：" + "；".join(errors)
+        ),
+        "log_id": str(remote_result.get("log_id") or ""),
+        "updated": updated,
+        "local_total": len(local_by_uid),
+        "remote_matched": len(matched_uids),
+        "local_missing_remote_count": len(missing_remote),
+        "local_missing_remote_uid_examples": [uid[:8] for uid in missing_remote[:10]],
+        "local_backfill": local_backfill,
+        "fields": fields_result,
+        "errors": errors,
+    }
+
+
 def list_tables(service=None):
     try:
         config = service.config if service is not None else get_feishu_config()
@@ -1883,6 +2477,34 @@ def _sync_summary(label, results, preflight=None, processed=None):
     }
 
 
+def _affected_start_date(rows):
+    transaction_uids = [str(row[0] or "") for row in rows if row]
+    if not transaction_uids:
+        return datetime.date.today().isoformat()
+    placeholders = ", ".join("?" for _ in transaction_uids)
+    with connect() as conn:
+        row = conn.execute(
+            f"""
+            SELECT MIN(substr(date, 1, 10))
+            FROM transactions
+            WHERE transaction_uid IN ({placeholders})
+            """,
+            transaction_uids,
+        ).fetchone()
+    return str(row[0] or datetime.date.today().isoformat())
+
+
+def _attach_dashboard_result(summary, dashboard):
+    summary = dict(summary)
+    summary["dashboard"] = dashboard
+    if dashboard and not dashboard.get("success"):
+        summary["success"] = False
+        summary["message"] += " 看板日指标刷新失败：" + str(
+            dashboard.get("message") or "未知错误"
+        )
+    return summary
+
+
 def _mark_sync_batch_failed(transaction_uids, error, update_outbox=True):
     if not transaction_uids:
         return
@@ -1907,7 +2529,7 @@ def _mark_sync_batch_failed(transaction_uids, error, update_outbox=True):
                     WHERE id = (
                         SELECT id FROM sync_outbox
                         WHERE transaction_uid = ?
-                          AND status IN ('pending', 'failed')
+                          AND status IN ('pending', 'failed', 'processing')
                         ORDER BY id DESC LIMIT 1
                     )
                     """,
@@ -1931,7 +2553,7 @@ def _finish_sync(
                 SET status = 'done', last_error = '',
                     updated_at = CURRENT_TIMESTAMP
                 WHERE transaction_uid = ?
-                  AND status IN ('pending', 'failed')
+                  AND status IN ('pending', 'failed', 'processing')
                 """,
                 (transaction_uid,),
             )
@@ -2312,17 +2934,36 @@ def _field_type_matches(field, expected_type):
     expected_ui = {
         1: {"text"},
         2: {"number"},
+        5: {"date", "datetime"},
         7: {"checkbox"},
     }.get(int(expected_type), set())
     return ui_type in expected_ui
 
 
 def _field_type_name(field_type):
+    try:
+        field_type = int(field_type)
+    except (TypeError, ValueError):
+        return str(field_type or "未知")
     return {
         1: "文本",
         2: "数字",
+        5: "日期",
         7: "复选框",
-    }.get(int(field_type), str(field_type))
+    }.get(field_type, str(field_type))
+
+
+def _chunks(items, size):
+    for start in range(0, len(items), int(size)):
+        yield items[start:start + int(size)]
+
+
+def _as_iso_date(value):
+    if isinstance(value, datetime.datetime):
+        value = value.date()
+    if isinstance(value, datetime.date):
+        return value.isoformat()
+    return datetime.date.fromisoformat(str(value)[:10]).isoformat()
 
 
 def main():
@@ -2343,6 +2984,8 @@ def main():
     group.add_argument("--ensure-main-table-fields", action="store_true")
     group.add_argument("--audit-derived-fields", action="store_true")
     group.add_argument("--backfill-derived-fields", action="store_true")
+    group.add_argument("--sync-dashboard-daily", action="store_true")
+    group.add_argument("--sync-dashboard-fields", action="store_true")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--apply", action="store_true")
@@ -2417,6 +3060,10 @@ def main():
         result = audit_derived_fields()
     elif args.backfill_derived_fields:
         result = backfill_derived_fields(apply=args.apply)
+    elif args.sync_dashboard_daily:
+        result = sync_daily_dashboard()
+    elif args.sync_dashboard_fields:
+        result = sync_dashboard_transaction_fields()
     else:
         result = cleanup_summary_tables(
             apply=args.apply,

@@ -42,7 +42,7 @@
 - **电脑上集中看**：Streamlit 面板用于查看分类、趋势、预算和日报；
 - **日报自动生成**：每天自动总结消费、收入、预算进度和建议；
 - **本地账本优先**：SQLite 数据库保存在本地，敏感配置不提交到 Git；
-- **飞书原始表同步**：将流水及高级分析字段同步到同一张 Bitable 原始表。
+- **飞书双表分析模型**：交易事实表用于结构分析，每日指标表用于 MTD/YTD、日均/月均和预算进度。
 
 ---
 
@@ -58,11 +58,14 @@
 | SQLite 存储 | 使用本地 SQLite 数据库保存账本数据 |
 | 邮件日报 | 自动生成并发送每日财务摘要 |
 | 飞书日报 | 将日报推送到飞书会话中 |
+| 个人垫付独立核算 | 垫付支出、回款和余额单独统计，不混入普通收支、预算和消费结构 |
 | 单原始表管理 | Streamlit 设置页在一张表中管理基础字段并展示只读高级字段 |
-| 多维表格同步 | 自动同步原始流水、日期维度、净额、金额区间和标签等高级字段 |
+| 多维表格同步 | 自动同步交易事实表与每日指标快照，支持 MTD/YTD、滚动日均、预算进度和月末支出预测 |
+| 看板安全字段 | 提供可直接求和的看板收入、看板支出、刚需/非刚需、固定/变动支出字段 |
 | 飞书快捷菜单 | 支持快捷查询、日报、同步及 DeepSeek 月度分析 |
 | 防重复回复 | 对消息和菜单事件按事件 ID 去重，避免飞书重投导致重复发送 |
-| 定时任务 | 后台调度日报、同步、服务管理等任务 |
+| 非阻塞增量同步 | 交易先写入本地账本，同步任务在后台排队、认领和重试，不阻塞记账回复 |
+| 定时任务 | 后台调度日报、每日看板快照、同步和服务管理等任务 |
 | 隐私保护 | `.env`、数据库、日志、导出文件和备份文件默认不提交 |
 
 飞书 DeepSeek 菜单事件：
@@ -73,6 +76,14 @@
 | 本月消费报告 | `monthly_consumption_report` |
 
 机器人通过 WebSocket 长连接接收事件，无需公网请求地址或端口。
+
+### 最新进展
+
+- 飞书多维表格升级为“交易事实表 + 每日指标快照表”的两层模型；
+- 支持 MTD/YTD 收入、支出、净额、日均/月均、储蓄率和预算节奏；
+- 个人垫付从普通收入、支出、预算、分类、标签和趋势中排除，并在 Streamlit、邮件、飞书日报和 DeepSeek 报告中单独列示；
+- 同步队列增加任务认领与超时恢复，降低多个后台进程重复处理同一任务的风险；
+- AI 解析与 DeepSeek 报告增加可配置输出 token 上限。
 
 ---
 
@@ -105,7 +116,8 @@ flowchart LR
         J[Streamlit 分析面板]
         K[邮件日报]
         L[飞书日报]
-        M[飞书多维表格]
+        M1[飞书交易事实表]
+        M2[飞书每日指标表]
     end
 
     A --> D
@@ -121,7 +133,8 @@ flowchart LR
     I --> J
     I --> K
     I --> L
-    I --> M
+    I --> M1
+    I --> M2
 ```
 
 ---
@@ -211,6 +224,7 @@ http://127.0.0.1:8501
 
 - [飞书机器人接入指南](docs/feishu_setup.md)
 - [飞书多维表格配置](docs/feishu_bitable_setup.md)
+- [飞书财务看板设计](docs/feishu_dashboard_design.md)
 
 ---
 
@@ -252,6 +266,18 @@ $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
 .\stop_services.bat    # 停止所有服务
 ```
 
+### 飞书看板数据
+
+```powershell
+# 创建并回填交易底表的看板安全字段
+.\.venv\Scripts\python.exe -m finance_tracker.bitable_sync --sync-dashboard-fields
+
+# 创建或刷新每日 MTD/YTD 指标快照
+.\.venv\Scripts\python.exe -m finance_tracker.bitable_sync --sync-dashboard-daily
+```
+
+日常新增、修改或删除交易后，项目会自动增量刷新受影响日期；以上命令主要用于首次部署或手动修复。
+
 ### 开机自启
 
 ```powershell
@@ -277,7 +303,9 @@ finance_tracker/
   ai_parser.py              # DeepSeek AI 自然语言解析
   deepseek_reports.py       # DeepSeek 财务报告 Prompt 与本地回退
   reporting.py              # 日报、月报和标签分析数据构建
+  advance_payment.py        # 个人垫付识别、排除和余额计算
   derived_fields.py         # 原始表高级分析字段计算
+  dashboard_metrics.py      # MTD/YTD 与每日看板快照计算
   transaction_service.py    # 事务处理、解析、校验
   feishu_bot.py             # 飞书长连接机器人入口
   feishu_client.py          # 飞书 Open API 封装
@@ -296,6 +324,7 @@ scripts/
 docs/
   feishu_setup.md               # 飞书机器人接入指南
   feishu_bitable_setup.md       # 飞书多维表格配置指南
+  feishu_dashboard_design.md    # 财务看板字段口径与布局建议
 ```
 
 ---
@@ -346,7 +375,8 @@ git status --ignored
 
 - [x] 飞书自定义菜单增强（快捷查询、DeepSeek 标签分析和消费报告）
 - [x] 飞书原始表高级字段与自动同步
-- [ ] 飞书 BI 看板完善
+- [x] 飞书 BI 双表模型与 MTD/YTD 指标
+- [x] 个人垫付独立核算
 - [ ] 月度预算预警通知
 - [ ] 账单批量导入（CSV / Excel）
 - [ ] 数据备份与恢复流程优化

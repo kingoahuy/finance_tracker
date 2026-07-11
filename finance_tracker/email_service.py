@@ -18,6 +18,7 @@ if str(MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(MODULE_DIR))
 
 from config import load_env_file
+from advance_payment import actual_transactions_df, personal_advance_df, personal_advance_summary
 from ledger import DB_FILE, MONTHLY_BUDGET, SPECIAL_TAG_RULES, load_transactions
 
 
@@ -78,6 +79,7 @@ def generate_report_content(df, target_date):
     df = df[df["date_only"] <= target_date].copy()
     if df.empty:
         return f"# 财务分析报告\n\n> 报告日：{target_date}  \n> 数据口径：截至报告日的本地账本\n\n报告日前暂无账本数据。"
+    raw_df = df.copy()
 
     target_ts = pd.Timestamp(target_date)
     month_start = target_ts.replace(day=1).date()
@@ -85,12 +87,19 @@ def generate_report_content(df, target_date):
     last_month_start = last_month_end.replace(day=1)
     last_month_same_end = last_month_start.replace(day=min(target_date.day, last_month_end.day))
 
-    day_df = df[df["date_only"] == target_date]
+    raw_day_df = raw_df[raw_df["date_only"] == target_date]
     yest_date = target_date - datetime.timedelta(days=1)
-    yest_df = df[df["date_only"] == yest_date]
-    month_df = df[(df["date_only"] >= month_start) & (df["date_only"] <= target_date)]
-    last_month_df = df[(df["date_only"] >= last_month_start) & (df["date_only"] <= last_month_same_end)]
-    year_df = df[(df["date"].dt.year == target_date.year) & (df["date_only"] <= target_date)]
+    raw_yest_df = raw_df[raw_df["date_only"] == yest_date]
+    raw_month_df = raw_df[(raw_df["date_only"] >= month_start) & (raw_df["date_only"] <= target_date)]
+    raw_last_month_df = raw_df[(raw_df["date_only"] >= last_month_start) & (raw_df["date_only"] <= last_month_same_end)]
+    raw_year_df = raw_df[(raw_df["date"].dt.year == target_date.year) & (raw_df["date_only"] <= target_date)]
+
+    df = actual_transactions_df(raw_df)
+    day_df = actual_transactions_df(raw_day_df)
+    yest_df = actual_transactions_df(raw_yest_df)
+    month_df = actual_transactions_df(raw_month_df)
+    last_month_df = actual_transactions_df(raw_last_month_df)
+    year_df = actual_transactions_df(raw_year_df)
 
     day_exp = _sum(day_df, "支出")
     day_inc = _sum(day_df, "收入")
@@ -132,6 +141,13 @@ def generate_report_content(df, target_date):
         avg_daily_exp=avg_daily_exp,
         top_category=top_month_category,
         largest_txn=largest_month_txn,
+    )
+    advance_section = _personal_advance_section(
+        raw_df,
+        target_date,
+        raw_day_df,
+        raw_month_df,
+        raw_year_df,
     )
     special_sections = _special_tag_sections(df, target_date)
 
@@ -208,6 +224,8 @@ def generate_report_content(df, target_date):
 ### 年度收入结构
 
 {year_inc_detail}
+
+{advance_section}
 
 {special_sections}
 """.strip()
@@ -399,6 +417,50 @@ def _progress_bar(percent, width=12):
     return "█" * filled + "░" * (width - filled)
 
 
+def _personal_advance_section(df, target_date, day_df, month_df, year_df):
+    day = personal_advance_summary(day_df, balance_df=df)
+    month = personal_advance_summary(month_df, balance_df=df)
+    year = personal_advance_summary(year_df, balance_df=df)
+    all_time = personal_advance_summary(df, balance_df=df)
+    details = _personal_advance_transaction_lines(personal_advance_df(month_df))
+    note = (
+        "本节只统计带“个人垫付”标签的流水，已从上方收入、支出、预算、分类和明细中排除。"
+    )
+    return f"""
+## 7. 个人垫付（单独列示）
+
+> {note}
+
+| 指标 | 数值 |
+| --- | ---: |
+| 今日垫付支出 | ¥{day['advance_expense']:.2f} |
+| 今日垫付回款 | ¥{day['advance_reimbursement']:.2f} |
+| 本月垫付支出 | ¥{month['advance_expense']:.2f} |
+| 本月垫付回款 | ¥{month['advance_reimbursement']:.2f} |
+| 本月垫付净额 | ¥{month['advance_balance']:.2f} |
+| 年度垫付支出 | ¥{year['advance_expense']:.2f} |
+| 年度垫付回款 | ¥{year['advance_reimbursement']:.2f} |
+| 截至{target_date}垫付余额 | ¥{all_time['current_balance']:.2f} |
+
+### 本月个人垫付明细
+
+{details}
+""".strip()
+
+
+def _personal_advance_transaction_lines(df):
+    if df is None or df.empty:
+        return "本月暂无个人垫付明细。"
+    lines = []
+    for _, row in df.sort_values(["date", "amount"], ascending=[False, False]).head(8).iterrows():
+        desc = row.get("description") or row.get("category") or "未命名"
+        sign = "+" if row.get("type") == "收入" else "-"
+        lines.append(
+            f"| {row['date_only']} | {_md(row.get('type'))} | {_md(row.get('category'))} | {sign}{_money(row.get('amount', 0))} | {_md(desc)} |"
+        )
+    return "| 日期 | 类型 | 类别 | 金额 | 说明 |\n| --- | --- | --- | ---: | --- |\n" + "\n".join(lines)
+
+
 def _special_tag_sections(df, target_date):
     sections = []
     if "tags" not in df.columns:
@@ -424,7 +486,7 @@ def _special_tag_sections(df, target_date):
         if tag_df.empty:
             sections.append(
                 f"""
-## 7. {title}专项
+## 8. {title}专项
 
 | 指标 | 数值 |
 | --- | ---: |
@@ -446,7 +508,7 @@ def _special_tag_sections(df, target_date):
 
         sections.append(
             f"""
-## 7. {title}专项
+## 8. {title}专项
 
 | 指标 | 数值 |
 | --- | ---: |

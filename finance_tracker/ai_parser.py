@@ -92,6 +92,13 @@ def get_ai_parser_config():
                 60,
             ),
         ),
+        "max_tokens": max(
+            128,
+            min(
+                int(os.getenv("AI_PARSER_MAX_TOKENS", "800") or "800"),
+                4000,
+            ),
+        ),
     }
 
 
@@ -121,6 +128,7 @@ def parse_action(
         response = ai_client.chat.completions.create(
             model=config["model"],
             timeout=config["timeout"],
+            max_tokens=int(config.get("max_tokens", 800)),
             response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": _system_prompt(base_date)},

@@ -319,6 +319,15 @@ def init_db():
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dashboard_sync_state (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
         conn.execute("UPDATE transactions SET id = rowid WHERE id IS NULL")
         conn.execute("UPDATE transactions SET source = 'streamlit' WHERE source IS NULL OR source = ''")
         conn.execute("UPDATE transactions SET sync_status = 'pending' WHERE sync_status IS NULL OR sync_status = ''")
@@ -569,7 +578,7 @@ def load_transactions(include_deleted=False):
                     status,
                     {DERIVED_COLUMN_SQL}
                 FROM transactions
-                WHERE (? = 1 OR status = 'active')
+                WHERE (? = 1 OR COALESCE(status, 'active') = 'active')
                 ORDER BY date DESC, rowid DESC
                 """,
                 conn,

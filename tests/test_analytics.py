@@ -53,6 +53,7 @@ class AnalyticsTest(unittest.TestCase):
                 "transaction_count", "average_daily_expense", "largest_expense",
                 "largest_expense_category", "current_month_income",
                 "current_month_expense", "current_month_balance", "today_expense",
+                "personal_advance",
             },
         )
         self.assertEqual(result["total_expense"], 1120.0)

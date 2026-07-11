@@ -3,6 +3,17 @@ import datetime
 import json
 import re
 
+try:
+    from .advance_payment import (
+        PERSONAL_ADVANCE_TAG,
+        text_mentions_personal_advance,
+    )
+except ImportError:
+    from advance_payment import (
+        PERSONAL_ADVANCE_TAG,
+        text_mentions_personal_advance,
+    )
+
 
 MAX_TAGS = 5
 INCOME_TAGS = {"工资", "奖金", "报销", "退款", "理财", "红包"}
@@ -101,6 +112,9 @@ def generate_tags(transaction, raw_text=None):
     is_fixed = _as_bool(transaction.get("is_fixed"))
 
     generated = []
+
+    if text_mentions_personal_advance(description, raw_text):
+        generated.append(PERSONAL_ADVANCE_TAG)
 
     if txn_type == "收入":
         income_tag = category if category in INCOME_TAGS else _first_match(

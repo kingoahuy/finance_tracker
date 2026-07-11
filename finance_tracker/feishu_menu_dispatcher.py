@@ -80,6 +80,7 @@ def _today_bill(_user_id):
         f"结余：¥{summary['net_income']:.2f}",
         f"交易笔数：{summary['transaction_count']}",
     ]
+    lines.extend(_personal_advance_lines(summary.get("personal_advance"), "今日"))
     return "\n".join(lines)
 
 
@@ -95,6 +96,7 @@ def _month_summary(_user_id):
         f"结余率：{summary['savings_rate']:.2f}%",
         f"交易笔数：{summary['transaction_count']}",
     ]
+    lines.extend(_personal_advance_lines(summary.get("personal_advance"), "本月"))
     return "\n".join(lines)
 
 
@@ -156,6 +158,24 @@ def _deepseek_report(prompt_name, payload, fallback_builder):
         return call_deepseek_report(prompt_name, payload)
     except Exception:
         return fallback_builder(payload)
+
+
+def _personal_advance_lines(advance, period_label):
+    advance = advance or {}
+    expense = float(advance.get("advance_expense") or 0)
+    reimbursement = float(advance.get("advance_reimbursement") or 0)
+    period_balance = float(advance.get("advance_balance") or 0)
+    current_balance = float(advance.get("current_balance", period_balance) or 0)
+    count = int(advance.get("transaction_count") or 0)
+    if not count and not expense and not reimbursement and not current_balance:
+        return []
+    return [
+        "",
+        "个人垫付（单独列示，不计入上方收支）：",
+        f"{period_label}垫付支出：¥{expense:.2f}",
+        f"{period_label}垫付回款：¥{reimbursement:.2f}",
+        f"当前垫付余额：¥{current_balance:.2f}",
+    ]
 
 
 def _sync_refresh(_user_id):

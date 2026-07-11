@@ -604,6 +604,33 @@ class BitableDiagnosticsTest(unittest.TestCase):
         )
         self.assertEqual(service.deleted, [])
 
+    def test_pending_sync_claim_prevents_double_worker_pickup(self):
+        local = transaction_service.create_transaction(
+            {
+                "date": "2026-06-14",
+                "type": "鏀嚭",
+                "category": "椁愰ギ",
+                "amount": 25,
+                "description": "private",
+            },
+            auto_sync=False,
+        )
+
+        first = bitable_sync._claim_sync_rows(limit=10, retry_limit=5)
+        second = bitable_sync._claim_sync_rows(limit=10, retry_limit=5)
+
+        self.assertEqual(first, [(local["transaction_uid"], "create")])
+        self.assertEqual(second, [])
+        with ledger.connect() as conn:
+            status = conn.execute(
+                """
+                SELECT status FROM sync_outbox
+                WHERE transaction_uid = ?
+                """,
+                (local["transaction_uid"],),
+            ).fetchone()[0]
+        self.assertEqual(status, "processing")
+
     def test_cleanup_test_records_dry_run_is_nondestructive(self):
         service = FakeRemoteService(
             [
@@ -900,6 +927,66 @@ class BitableDiagnosticsTest(unittest.TestCase):
         self.assertEqual(create_payload["expense_amount"], 25.0)
         self.assertEqual(create_payload["net_amount"], -25.0)
         self.assertEqual(create_payload["is_expense"], 1)
+
+    def test_stale_local_record_id_creates_when_uid_is_missing_remote(self):
+        record = transaction_service.create_transaction(
+            {
+                "date": "2026-06-14",
+                "type": "鏀嚭",
+                "category": "椁愰ギ",
+                "amount": 25,
+                "description": "private",
+            },
+            auto_sync=False,
+        )
+        with ledger.connect() as conn:
+            conn.execute(
+                """
+                UPDATE transactions SET feishu_record_id = ?
+                WHERE transaction_uid = ?
+                """,
+                ("rec-stale", record["transaction_uid"]),
+            )
+        service = FakeFieldService(
+            {
+                "success": True,
+                "code": 0,
+                "message": "",
+                "log_id": "log-fields",
+                "fields": required_field_defs(),
+            }
+        )
+        service.search_record = mock.Mock(
+            return_value={
+                "success": True,
+                "code": 0,
+                "message": "",
+                "log_id": "log-search",
+                "record_id": None,
+                "match_count": 0,
+            }
+        )
+        service.update_record = mock.Mock()
+        service.create_record = mock.Mock(
+            return_value={
+                "success": True,
+                "code": 0,
+                "message": "ok",
+                "log_id": "log-create",
+                "record_id": "rec-new",
+            }
+        )
+
+        result = bitable_sync.sync_one_pending(service=service)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(
+            [step["step"] for step in result["steps"]],
+            ["search", "create"],
+        )
+        self.assertFalse(result["steps"][0]["record_id_found"])
+        service.update_record.assert_not_called()
+        service.create_record.assert_called_once()
 
     def test_sync_one_traces_update_when_record_exists(self):
         record = transaction_service.create_transaction(
