@@ -85,9 +85,12 @@ FEISHU_SYNC_RETRY_LIMIT=5
 DEEPSEEK_API_KEY=
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 DEEPSEEK_MODEL=deepseek-v4-flash
+DEEPSEEK_COMPLEX_MODEL=deepseek-v4-pro
+AI_PARSER_COMPLEX_MODEL_ENABLED=true
 AI_PARSER_ENABLED=true
 AI_PARSER_REQUIRE_CONFIRMATION=true
 AI_PARSER_TIMEOUT_SECONDS=15
+AI_PARSER_COMPLEX_MAX_TOKENS=2400
 AI_PARSER_FALLBACK_TO_LOCAL=true
 ```
 
@@ -129,6 +132,7 @@ AI_PARSER_FALLBACK_TO_LOCAL=true
 - `撤销上一笔`
 - `删除 ID 12`
 - 普通记账文本，例如 `昨天打车36.5，晚饭42`
+- 重复记账文本，例如 `这一周每天收到了公司30的餐补`、`上周工作日每天地铁4元`
 
 记账、删除和修改默认需要在飞书卡片中二次确认，卡片 10 分钟后过期。重复确认不会重复写入。删除是软删除，仅限操作者本人在当前会话通过飞书创建的有效流水。
 
@@ -173,6 +177,8 @@ DeepSeek 只负责把用户消息解析为结构化 JSON，包括意图、交易
 - 处理卡片确认以及“确认、可以、记上、取消、算了”等文本操作；
 - 执行 SQLite 写入并沿用原有多维表格同步；
 - AI 超时、JSON 错误或低置信度时回退本地规则。
+- 明确的重复周期由本地规则逐日展开；复杂输入先用 V4 Flash，结构不完整时才升级 V4 Pro。
+- 标签由本地事实规则收敛为最多 3 个，不接受 AI 无依据的新标签。
 
 短期上下文保存在 `feishu_sessions`。身份只保存 SHA-256 哈希，会话只保留最近
 必要的交易草稿和意图摘要，默认 10 分钟过期。

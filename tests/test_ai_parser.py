@@ -20,6 +20,18 @@ class FakeCompletions:
         return SimpleNamespace(choices=[SimpleNamespace(message=message)])
 
 
+class SequenceCompletions:
+    def __init__(self, payloads):
+        self.payloads = list(payloads)
+        self.calls = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        payload = self.payloads.pop(0)
+        message = SimpleNamespace(content=json.dumps(payload, ensure_ascii=False))
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+
 class AiParserTest(unittest.TestCase):
     def _client(self, completions):
         return SimpleNamespace(chat=SimpleNamespace(completions=completions))
@@ -58,7 +70,7 @@ class AiParserTest(unittest.TestCase):
         self.assertTrue(result["need_confirmation"])
         self.assertEqual(completions.kwargs["response_format"], {"type": "json_object"})
 
-    def test_ai_tags_are_preserved_and_supplemented(self):
+    def test_ai_tag_guesses_are_replaced_by_evidence_backed_tags(self):
         completions = FakeCompletions(
             {
                 "intent": "create_transactions",
@@ -92,8 +104,104 @@ class AiParserTest(unittest.TestCase):
             },
         )
         tags = result["transactions"][0]["tags"].split(",")
-        self.assertEqual(tags[0], "AI自定义")
         self.assertIn("咖啡", tags)
+        self.assertNotIn("AI自定义", tags)
+
+    def test_clear_weekly_recurrence_is_expanded_without_ai(self):
+        result = ai_parser.parse_action(
+            "我说这一周每天收到了公司30的餐补",
+            default_date="2026-07-18",
+            config={
+                "enabled": False,
+                "require_confirmation": True,
+                "fallback_to_local": True,
+                "api_key": "",
+                "base_url": "",
+                "model": "",
+                "timeout": 1,
+            },
+        )
+        self.assertEqual(result["parser"], "local_recurrence")
+        self.assertEqual(len(result["transactions"]), 6)
+        self.assertEqual(result["transactions"][0]["date"], "2026-07-13")
+        self.assertEqual(result["transactions"][-1]["date"], "2026-07-18")
+        self.assertEqual(result["transactions"][0]["type"], "收入")
+        self.assertEqual(result["transactions"][0]["category"], "补贴")
+        self.assertEqual(result["transactions"][0]["description"], "公司餐补")
+        self.assertEqual(result["transactions"][0]["tags"], "餐补,公司福利")
+
+    def test_flash_incomplete_complex_recurrence_retries_with_pro(self):
+        dates = [f"2026-07-{day:02d}" for day in range(6, 11)]
+        pro_transactions = []
+        for date in dates:
+            pro_transactions.extend(
+                [
+                    {"date": date, "type": "支出", "category": "交通", "amount": 4, "description": "地铁"},
+                    {"date": date, "type": "支出", "category": "交通", "amount": 2, "description": "公交"},
+                ]
+            )
+        completions = SequenceCompletions(
+            [
+                {
+                    "intent": "create_transactions",
+                    "confidence": 0.95,
+                    "transactions": [pro_transactions[0]],
+                },
+                {
+                    "intent": "create_transactions",
+                    "confidence": 0.95,
+                    "transactions": pro_transactions,
+                },
+            ]
+        )
+        result = ai_parser.parse_action(
+            "上周工作日每天分别地铁4元和公交2元",
+            default_date="2026-07-18",
+            client=self._client(completions),
+            config={
+                "enabled": True,
+                "require_confirmation": True,
+                "fallback_to_local": True,
+                "api_key": "test",
+                "base_url": "https://example.invalid",
+                "model": "deepseek-v4-flash",
+                "complex_model": "deepseek-v4-pro",
+                "complex_model_enabled": True,
+                "timeout": 3,
+                "max_tokens": 800,
+                "complex_max_tokens": 2400,
+            },
+        )
+        self.assertEqual(len(result["transactions"]), 10)
+        self.assertEqual(result["model_tier"], "pro")
+        self.assertEqual(
+            [call["model"] for call in completions.calls],
+            ["deepseek-v4-flash", "deepseek-v4-pro"],
+        )
+
+    def test_flash_missing_second_transaction_retries_with_pro(self):
+        first = {"date": "2026-07-18", "type": "支出", "category": "餐饮", "amount": 25, "description": "午饭"}
+        second = {"date": "2026-07-18", "type": "支出", "category": "交通", "amount": 30, "description": "打车"}
+        completions = SequenceCompletions(
+            [
+                {"intent": "create_transactions", "confidence": 0.95, "transactions": [first]},
+                {"intent": "create_transactions", "confidence": 0.95, "transactions": [first, second]},
+            ]
+        )
+        result = ai_parser.parse_action(
+            "午饭25，另外打车30",
+            default_date="2026-07-18",
+            client=self._client(completions),
+            config={
+                "enabled": True, "require_confirmation": True,
+                "fallback_to_local": True, "api_key": "test",
+                "base_url": "https://example.invalid",
+                "model": "deepseek-v4-flash", "complex_model": "deepseek-v4-pro",
+                "complex_model_enabled": True, "timeout": 3,
+            },
+        )
+        self.assertEqual(len(result["transactions"]), 2)
+        self.assertEqual(result["model_tier"], "pro")
 
     def test_timeout_falls_back_to_local_without_logging_text(self):
         completions = FakeCompletions(error=TimeoutError("secret lunch text"))

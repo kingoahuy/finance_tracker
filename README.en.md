@@ -55,7 +55,7 @@ Finance Tracker Pro is designed around a simpler workflow:
 | --- | --- |
 | Web tracking and analytics | Streamlit-based entry, filtering, statistics, and trend charts |
 | Feishu mobile tracking | Record expenses by sending natural language messages to a Feishu bot |
-| AI parsing | Optionally use DeepSeek to parse natural language into structured transactions |
+| AI parsing | Expand clear recurrences locally; use DeepSeek V4 Flash normally and retry V4 Pro only for complex or structurally incomplete parses |
 | Local parser fallback | Fall back to local rule-based parsing when AI is unavailable |
 | Confirmation cards | Confirm create, delete, and update actions before database writes |
 | SQLite storage | Store the account book locally |

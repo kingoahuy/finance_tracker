@@ -51,6 +51,7 @@ CATEGORIES = [
     "退款",
     "退税",
     "报销",
+    "补贴",
     "红包",
     "其他",
 ]
@@ -67,6 +68,13 @@ SPECIAL_TAG_RULES = [
 ]
 
 INCOME_KEYWORDS = {
+    "餐费补贴": "补贴",
+    "伙食补贴": "补贴",
+    "交通补贴": "补贴",
+    "住房补贴": "补贴",
+    "餐补": "补贴",
+    "津贴": "补贴",
+    "补贴": "补贴",
     "工资": "工资",
     "奖金": "奖金",
     "兼职": "兼职",
@@ -1199,11 +1207,225 @@ def _utc_text(value=None):
 
 def parse_entry_text(text, default_date=None):
     base_date = _coerce_date(default_date or datetime.date.today())
+    recurring = parse_recurring_entry_text(text, base_date)
+    if recurring:
+        return recurring
     parts = split_date_chunks(text or "", base_date)
     records = []
     for entry_date, part in parts:
         records.extend(parse_amount_entries(part, entry_date))
     return records
+
+
+RECURRENCE_CADENCE_RE = re.compile(
+    r"工作日每天|每个工作日|每工作日|每周一至周五|每天|每日|每周[一二三四五六日天]"
+)
+RECURRENCE_SCOPE_RE = re.compile(
+    r"这一周|这周|本周|上一周|上周|这个月|本月|上个月|"
+    r"(?:过去|最近|连续)[零〇一二两三四五六七八九十百\d]+天"
+)
+CHINESE_DATE_RANGE_RE = re.compile(
+    r"(?:(\d{4})年)?(\d{1,2})月(\d{1,2})日?\s*"
+    r"(?:到|至|~|～|—)\s*"
+    r"(?:(\d{4})年)?(?:(\d{1,2})月)?(\d{1,2})日?"
+)
+ISO_DATE_RANGE_RE = re.compile(
+    r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})\s*"
+    r"(?:到|至|~|～|—)\s*"
+    r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})"
+)
+RECURRENCE_NARRATION_RE = re.compile(
+    r"^(?:我说(?:一下)?|帮我|麻烦|请|记一下|记录一下|记账|我)?"
+)
+RECURRENCE_ACTION_RE = re.compile(
+    r"收到(?:了)?|收到了|到账(?:了)?|发放(?:了)?|发了|给了|"
+    r"花了|花|支付(?:了)?|付了|付|消费(?:了)?|支出(?:了)?|买了|买|"
+    r"每天|每日|工作日"
+)
+
+
+def looks_like_recurring_entry(text):
+    value = re.sub(r"\s+", "", str(text or ""))
+    has_cadence = bool(RECURRENCE_CADENCE_RE.search(value))
+    has_scope = bool(
+        RECURRENCE_SCOPE_RE.search(value)
+        or CHINESE_DATE_RANGE_RE.search(value)
+        or ISO_DATE_RANGE_RE.search(value)
+    )
+    return has_cadence and has_scope
+
+
+def recurring_dates_for_text(text, default_date=None, max_occurrences=92):
+    """Resolve a bounded, completed recurrence schedule without inferring facts."""
+    base_date = _coerce_date(default_date or datetime.date.today())
+    value = re.sub(r"\s+", "", str(text or ""))
+    cadence_match = RECURRENCE_CADENCE_RE.search(value)
+    if not cadence_match:
+        return []
+
+    start = end = None
+    iso_match = ISO_DATE_RANGE_RE.search(value)
+    chinese_match = CHINESE_DATE_RANGE_RE.search(value)
+    if iso_match:
+        sy, sm, sd, ey, em, ed = (int(item) for item in iso_match.groups())
+        start = datetime.date(sy, sm, sd)
+        end = datetime.date(ey, em, ed)
+    elif chinese_match:
+        sy, sm, sd, ey, em, ed = chinese_match.groups()
+        start = datetime.date(int(sy or base_date.year), int(sm), int(sd))
+        end = datetime.date(
+            int(ey or start.year),
+            int(em or start.month),
+            int(ed),
+        )
+    else:
+        scope_match = RECURRENCE_SCOPE_RE.search(value)
+        if not scope_match:
+            return []
+        scope = scope_match.group(0)
+        if scope in {"这一周", "这周", "本周"}:
+            start = base_date - datetime.timedelta(days=base_date.weekday())
+            end = base_date
+        elif scope in {"上一周", "上周"}:
+            start = base_date - datetime.timedelta(days=base_date.weekday() + 7)
+            end = start + datetime.timedelta(days=6)
+        elif scope in {"这个月", "本月"}:
+            start = base_date.replace(day=1)
+            end = base_date
+        elif scope == "上个月":
+            end = base_date.replace(day=1) - datetime.timedelta(days=1)
+            start = end.replace(day=1)
+        else:
+            number_match = re.search(r"[零〇一二两三四五六七八九十百\d]+", scope)
+            day_count = _parse_cn_integer(number_match.group(0)) if number_match else 0
+            if not 1 <= day_count <= max_occurrences:
+                return []
+            end = base_date
+            start = end - datetime.timedelta(days=day_count - 1)
+
+    if not start or not end or end < start or end > base_date:
+        return []
+    total_days = (end - start).days + 1
+    if total_days > max_occurrences:
+        return []
+
+    cadence = cadence_match.group(0)
+    target_weekday = None
+    weekday_match = re.fullmatch(r"每周([一二三四五六日天])", cadence)
+    if weekday_match:
+        target_weekday = "一二三四五六日".index(
+            "日" if weekday_match.group(1) == "天" else weekday_match.group(1)
+        )
+
+    dates = []
+    for offset in range(total_days):
+        item = start + datetime.timedelta(days=offset)
+        if cadence in {"工作日每天", "每个工作日", "每工作日", "每周一至周五"}:
+            if item.weekday() >= 5:
+                continue
+        elif target_weekday is not None and item.weekday() != target_weekday:
+            continue
+        dates.append(item)
+    return dates if len(dates) <= max_occurrences else []
+
+
+def recurring_amount_count(text):
+    """Count explicit per-occurrence amounts after removing date/frequency numbers."""
+    value = re.sub(r"\s+", "", str(text or ""))
+    value = ISO_DATE_RANGE_RE.sub("", value, count=1)
+    value = CHINESE_DATE_RANGE_RE.sub("", value, count=1)
+    value = RECURRENCE_SCOPE_RE.sub("", value, count=1)
+    value = RECURRENCE_CADENCE_RE.sub("", value, count=1)
+    return len(AMOUNT_RE.findall(value))
+
+
+def parse_recurring_entry_text(text, default_date=None):
+    """Expand clear date-range recurrences into one validated row per occurrence."""
+    base_date = _coerce_date(default_date or datetime.date.today())
+    if any(keyword in str(text or "") for keyword in ("多少", "几笔", "合计", "总共", "统计")):
+        return []
+    if not looks_like_recurring_entry(text):
+        return []
+    dates = recurring_dates_for_text(text, base_date)
+    if not dates:
+        return []
+
+    value = re.sub(r"\s+", "", str(text or ""))
+    value = ISO_DATE_RANGE_RE.sub("", value, count=1)
+    value = CHINESE_DATE_RANGE_RE.sub("", value, count=1)
+    value = RECURRENCE_SCOPE_RE.sub("", value, count=1)
+    value = RECURRENCE_CADENCE_RE.sub("", value, count=1)
+    amount_matches = list(AMOUNT_RE.finditer(value))
+    if len(amount_matches) != 1:
+        return []
+    amount = float(amount_matches[0].group(1))
+    if not 0 < amount <= 100000000:
+        return []
+
+    txn_type, category = classify_text(str(text or ""))
+    description_text = (
+        value[: amount_matches[0].start()] + value[amount_matches[0].end() :]
+    )
+    description = _clean_recurring_description(description_text, category)
+    is_need = int(txn_type == "支出" and category in NEED_CATEGORIES)
+    is_fixed = int(
+        any(keyword.lower() in description.lower() for keyword in FIXED_KEYWORDS)
+    )
+    records = []
+    for item_date in dates:
+        date_value = item_date.isoformat()
+        tags = generate_tags(
+            {
+                "date": date_value,
+                "type": txn_type,
+                "category": category,
+                "amount": amount,
+                "description": description,
+                "is_need": is_need,
+                "is_fixed": is_fixed,
+            },
+            raw_text=text,
+            preserve_existing=False,
+        )
+        records.append(
+            {
+                "date": date_value,
+                "type": txn_type,
+                "category": category,
+                "amount": amount,
+                "description": description,
+                "tags": tags,
+                "is_need": is_need,
+                "is_fixed": is_fixed,
+                "local_comment": "已按明确的重复周期展开，未调用外部 AI。",
+            }
+        )
+    return records
+
+
+def _clean_recurring_description(text, category):
+    value = RECURRENCE_NARRATION_RE.sub("", str(text or ""))
+    value = RECURRENCE_ACTION_RE.sub("", value)
+    value = re.sub(r"(?:元|块|rmb|RMB)", "", value)
+    value = re.sub(r"[的了，,。.；;：:\s]+", "", value)
+    return value[:200] or category
+
+
+def _parse_cn_integer(value):
+    text = str(value or "")
+    if text.isdigit():
+        return int(text)
+    digits = {"零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
+              "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+    if text == "十":
+        return 10
+    if "百" in text:
+        left, _, right = text.partition("百")
+        return digits.get(left, 1) * 100 + _parse_cn_integer(right or "零")
+    if "十" in text:
+        left, _, right = text.partition("十")
+        return digits.get(left, 1) * 10 + digits.get(right, 0)
+    return digits.get(text, 0)
 
 
 def split_date_chunks(text, base_date):
