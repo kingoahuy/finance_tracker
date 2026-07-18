@@ -47,6 +47,16 @@ def parse_web_bookkeeping(text, default_date=None, parser=None):
         message = "DeepSeek 本次返回格式异常，没有写入账本；请直接重试一次。"
     elif reason == "low_confidence":
         message = "DeepSeek 对这条内容把握不足，请补充明确的金额和事项后重试。"
+    elif reason in {"recurrence_count_mismatch", "recurrence_not_expanded"}:
+        message = "DeepSeek 未完整展开周期流水，请把周期、频率和每次金额写明确后重试。"
+    elif reason == "multiple_transactions_incomplete":
+        message = "DeepSeek 遗漏了部分事项，请用逗号或换行分开每笔收支后重试。"
+    elif reason == "future_transaction_rejected":
+        message = "草稿包含尚未发生的未来流水，系统已拒绝写入；请明确已发生的日期范围。"
+    elif reason == "unnecessary_clarification":
+        message = "DeepSeek 仍未正确使用已提供的金额，请换一种简短说法后重试。"
+    elif reason in {"ai_client_error", "ai_error"}:
+        message = "DeepSeek 接口本次调用异常，没有写入账本；请稍后重试。"
     else:
         message = "DeepSeek 暂未生成可校验的记账草稿，没有写入账本；请重试或补充信息。"
     return {"success": False, "action": action, "message": message}

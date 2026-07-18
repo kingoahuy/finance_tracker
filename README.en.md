@@ -81,6 +81,7 @@ Finance Tracker Pro is designed around a simpler workflow:
 - Added full UID-based Bitable reconciliation and read-back consistency checks for historical tag or field migrations.
 - Switched Streamlit bookkeeping to DeepSeek-only parsing with explicit confirmation and no silent local fallback.
 - Added a bookkeeping-only prompt, tolerant JSON extraction, and a separate Pro timeout for reliable web drafts.
+- Added one bounded Pro repair pass when an otherwise valid draft fails count, date, or completeness checks.
 - Added daily remote-first cleanup so deleting stale invalid rows cannot create Feishu orphans.
 - Added configurable output-token limits for AI parsing and DeepSeek reports.
 

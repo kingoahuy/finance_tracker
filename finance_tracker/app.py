@@ -205,7 +205,7 @@ def main():
             if pending_web_action:
                 tier = pending_web_action.get("model_tier", "flash")
                 st.info(
-                    f"DeepSeek {'Pro' if tier == 'pro' else 'Flash'} 已生成草稿，"
+                    f"DeepSeek {'Pro' if str(tier).startswith('pro') else 'Flash'} 已生成草稿，"
                     "请检查日期、收支、金额、分类和标签。"
                 )
                 st.dataframe(

@@ -232,6 +232,43 @@ def parse_action(
                 action["model_tier"] = "pro"
             first_error = complex_error
 
+            if (
+                ai_only
+                and action is not None
+                and quality_reason
+                and not complex_error
+            ):
+                repair_context = _ai_retry_context(
+                    safe_context,
+                    text,
+                    base_date,
+                    quality_reason,
+                )
+                repair_context["repair_required"] = True
+                repair_context["previous_attempt"] = {
+                    "intent": action.get("intent"),
+                    "confidence": action.get("confidence"),
+                    "transaction_count": len(action.get("transactions") or []),
+                }
+                action, repair_error = _call_ai_model(
+                    ai_client,
+                    text,
+                    base_date,
+                    repair_context,
+                    model=complex_model,
+                    timeout=int(config.get("complex_timeout", 35)),
+                    max_tokens=int(config.get("complex_max_tokens", 2400)),
+                )
+                quality_reason = _action_quality_issue(
+                    action,
+                    text,
+                    base_date,
+                    strict_bookkeeping=True,
+                )
+                if action is not None:
+                    action["model_tier"] = "pro_repair"
+                first_error = repair_error
+
     if action is not None and not quality_reason:
         if (
             action["intent"] == "ask_clarification"
@@ -259,6 +296,12 @@ def parse_action(
     fallback_reason = first_error or quality_reason or "ai_error"
     if config["fallback_to_local"] and not ai_only:
         return _local_action(text, base_date, fallback_reason, safe_context)
+    LOGGER.warning(
+        "AI parser rejected: reason=%s intent=%s transaction_count=%d",
+        fallback_reason,
+        (action or {}).get("intent", "none"),
+        len((action or {}).get("transactions") or []),
+    )
     return _unknown(fallback_reason)
 
 
@@ -1060,6 +1103,9 @@ category 只能是：{categories}
 20. conversation_context.candidate_transactions 只在 Flash 结果不可靠后提供给 Pro；
     它是由确定性规则生成的有限候选。请结合用户原文逐笔验证、修正并返回完整 JSON，
     不得省略实际发生日期，也不得添加原文和候选都不支持的交易。
+21. conversation_context.repair_required=true 时，上一轮 Pro 草稿未通过 retry_reason 指定的结构校验；
+    必须针对该原因修复并返回完整 JSON。previous_attempt 只提供上一轮意图、置信度和笔数，
+    不代表正确结果；最终 transactions 必须同时满足原文、候选和日期约束。
 """.strip()
 
 
@@ -1104,6 +1150,8 @@ intent 只能是 create_transactions 或 ask_clarification。
 8. tags 最多3个，只写原文能证明的消费场景、收入来源或明确项目；不要写星期、金额档位或分类名。
 9. is_need、is_fixed 只能按原文和常识谨慎判断；不确定时返回 false。
 10. 信息充分时 confidence 应不低于0.85；不要因为口语简短而返回 unknown 或 chat。
+11. conversation_context.repair_required=true 时，上一轮草稿未通过 retry_reason 指定的校验；
+    必须补全遗漏、修正日期或笔数后重新返回完整 JSON，不要重复原错误。
 """.strip()
 
 

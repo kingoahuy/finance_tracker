@@ -329,6 +329,65 @@ class AiParserTest(unittest.TestCase):
         self.assertEqual(result["intent"], "create_transactions")
         self.assertEqual(result["model_tier"], "pro")
 
+    def test_ai_only_repairs_incomplete_pro_result_once(self):
+        first = {
+            "date": "2026-07-18",
+            "type": "支出",
+            "category": "餐饮",
+            "amount": 25,
+            "description": "午饭",
+        }
+        second = {
+            "date": "2026-07-18",
+            "type": "支出",
+            "category": "交通",
+            "amount": 30,
+            "description": "打车",
+        }
+        completions = SequenceCompletions(
+            [
+                {"intent": "unknown", "confidence": 0.2, "transactions": []},
+                {
+                    "intent": "create_transactions",
+                    "confidence": 0.95,
+                    "transactions": [first],
+                },
+                {
+                    "intent": "create_transactions",
+                    "confidence": 0.95,
+                    "transactions": [first, second],
+                },
+            ]
+        )
+        result = ai_parser.parse_action(
+            "午饭25，另外打车30",
+            default_date="2026-07-18",
+            ai_only=True,
+            context={"task_mode": "bookkeeping_only"},
+            client=self._client(completions),
+            config={
+                "enabled": True,
+                "require_confirmation": True,
+                "fallback_to_local": True,
+                "api_key": "test",
+                "base_url": "https://example.invalid",
+                "model": "deepseek-v4-flash",
+                "complex_model": "deepseek-v4-pro",
+                "complex_model_enabled": True,
+                "timeout": 3,
+                "complex_timeout": 11,
+            },
+        )
+        self.assertEqual(result["model_tier"], "pro_repair")
+        self.assertEqual(len(result["transactions"]), 2)
+        self.assertEqual(len(completions.calls), 3)
+        repair_payload = json.loads(completions.calls[2]["messages"][1]["content"])
+        self.assertTrue(repair_payload["conversation_context"]["repair_required"])
+        self.assertEqual(
+            repair_payload["conversation_context"]["retry_reason"],
+            "multiple_transactions_incomplete",
+        )
+
     def test_flash_incomplete_complex_recurrence_retries_with_pro(self):
         dates = [f"2026-07-{day:02d}" for day in range(6, 11)]
         pro_transactions = []

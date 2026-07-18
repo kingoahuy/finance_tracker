@@ -173,7 +173,7 @@ SQLite 是主数据源。飞书同步失败不会回滚本地账单，scheduler 
 
 - 仅当 `AI_PARSER_ENABLED=true` 且配置了密钥时，才会调用兼容 OpenAI 的 DeepSeek 接口。
 - Streamlit 记账强制使用 DeepSeek：先展示结构化草稿，确认后才写入；AI 不可用时不会退回本地规则直接记账。
-- 常规输入使用 `DEEPSEEK_MODEL`，复杂输入或结构不完整时自动使用 `DEEPSEEK_COMPLEX_MODEL` 重试一次。
+- 常规输入使用 `DEEPSEEK_MODEL`；复杂输入或结构不完整时升级 `DEEPSEEK_COMPLEX_MODEL`，若 Pro 草稿仅因笔数、日期或遗漏未通过校验，最多再修复一次。
 
 ## 11. 定期清理无效数据
 
