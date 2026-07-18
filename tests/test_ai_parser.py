@@ -130,6 +130,69 @@ class AiParserTest(unittest.TestCase):
         self.assertEqual(result["transactions"][0]["description"], "公司餐补")
         self.assertEqual(result["transactions"][0]["tags"], "餐补,公司福利")
 
+    def test_ai_only_never_falls_back_to_local_parser(self):
+        result = ai_parser.parse_action(
+            "午饭25",
+            ai_only=True,
+            config={
+                "enabled": False,
+                "require_confirmation": True,
+                "fallback_to_local": True,
+                "api_key": "",
+                "base_url": "",
+                "model": "",
+                "timeout": 1,
+            },
+        )
+        self.assertEqual(result["intent"], "unknown")
+        self.assertEqual(result["parser"], "none")
+        self.assertEqual(result["reason"], "deepseek_disabled_or_unconfigured")
+
+    def test_ai_only_retries_low_quality_flash_with_pro(self):
+        completions = SequenceCompletions(
+            [
+                {"intent": "unknown", "confidence": 0.2, "transactions": []},
+                {
+                    "intent": "create_transactions",
+                    "confidence": 0.95,
+                    "transactions": [
+                        {
+                            "date": "2026-07-18",
+                            "type": "支出",
+                            "category": "餐饮",
+                            "amount": 20,
+                            "description": "午饭",
+                        }
+                    ],
+                },
+            ]
+        )
+        result = ai_parser.parse_action(
+            "午饭20",
+            default_date="2026-07-18",
+            ai_only=True,
+            client=self._client(completions),
+            config={
+                "enabled": True,
+                "require_confirmation": True,
+                "fallback_to_local": True,
+                "api_key": "test",
+                "base_url": "https://example.invalid",
+                "model": "deepseek-v4-flash",
+                "complex_model": "deepseek-v4-pro",
+                "complex_model_enabled": True,
+                "timeout": 3,
+                "max_tokens": 800,
+                "complex_max_tokens": 2400,
+            },
+        )
+        self.assertEqual(result["parser"], "ai")
+        self.assertEqual(result["model_tier"], "pro")
+        self.assertEqual(
+            [call["model"] for call in completions.calls],
+            ["deepseek-v4-flash", "deepseek-v4-pro"],
+        )
+
     def test_flash_incomplete_complex_recurrence_retries_with_pro(self):
         dates = [f"2026-07-{day:02d}" for day in range(6, 11)]
         pro_transactions = []

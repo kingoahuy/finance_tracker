@@ -64,6 +64,8 @@
 | 看板安全字段 | 提供可直接求和的看板收入、看板支出、刚需/非刚需、固定/变动支出字段 |
 | 精简场景标签 | 标签最多 3 个；优先匹配真实场景，无法细分时使用清晰的分类场景兜底，历史有效流水不留空标签 |
 | 飞书批量对账 | 按交易 UID 批量补建/更新原始表，并回读核对日期、类型、分类、金额、描述、标签和状态 |
+| DeepSeek 网页记账 | Streamlit 与飞书共用 AI 解析策略，Flash 不足时升级 Pro，确认草稿后才写入 |
+| 定期无效数据清理 | 每日保守清理明确测试/结构非法记录，并在保留期后清除已同步软删除行 |
 | 飞书快捷菜单 | 支持快捷查询、日报、同步及 DeepSeek 月度分析 |
 | 防重复回复 | 对消息和菜单事件按事件 ID 去重，避免飞书重投导致重复发送 |
 | 非阻塞增量同步 | 交易先写入本地账本，同步任务在后台排队、认领和重试，不阻塞记账回复 |
@@ -85,6 +87,8 @@
 - 常规解析使用 `deepseek-v4-flash`，仅在复杂输入、低置信度或周期未完整展开时重试 `deepseek-v4-pro`；
 - 标签体系从“最多 5 个混合标签”收敛为“最多 3 个事实标签”，历史标签可在备份后确定性重建；
 - 增加 SQLite 与飞书原始表的批量全字段对账，避免大量历史更新长期滞留在逐笔同步队列；
+- Streamlit 记账改为 DeepSeek-only 解析和确认后写入，AI 不可用时不会静默退回本地识别；
+- scheduler 每日清理明确无效数据，涉及飞书记录时先删远端、再删本地，避免产生孤儿行；
 - 飞书多维表格升级为“交易事实表 + 每日指标快照表”的两层模型；
 - 支持 MTD/YTD 收入、支出、净额、日均/月均、储蓄率和预算节奏；
 - 个人垫付从普通收入、支出、预算、分类、标签和趋势中排除，并在 Streamlit、邮件、飞书日报和 DeepSeek 报告中单独列示；
@@ -196,6 +200,7 @@ http://127.0.0.1:8501
 | 飞书权限 | `FEISHU_ALLOWED_OPEN_IDS` / `FEISHU_ALLOWED_CHAT_IDS` | 允许使用机器人的用户或群聊白名单 |
 | 多维表格 | `FEISHU_BITABLE_APP_TOKEN` / `FEISHU_BITABLE_TABLE_ID` | 飞书多维表格同步配置 |
 | AI 解析 | `DEEPSEEK_API_KEY` / `DEEPSEEK_MODEL` / `DEEPSEEK_COMPLEX_MODEL` | DeepSeek 常规模型与复杂输入升级模型，可选 |
+| 无效数据清理 | `INVALID_DATA_CLEANUP_ENABLED` / `INVALID_DATA_CLEANUP_HOUR` / `INVALID_DATA_RETENTION_DAYS` | 默认每日 03:00 清理，软删除保留 30 天 |
 
 > 完整配置以 `.env.example` 为准。不要把真实 `.env`、邮箱授权码、飞书 token、账本数据库提交到 GitHub。
 
@@ -313,9 +318,11 @@ finance_tracker/
   tagging.py                # 分类标签管理
   email_service.py          # 邮件日报生成与 SMTP 发送
   scheduler.py              # 后台定时任务调度器
+  data_cleanup.py           # 保守的本地/飞书无效数据定期清理
   account_ops.py            # 命令行工具
   service_runner.py         # 服务进程管理
   ai_parser.py              # DeepSeek AI 自然语言解析
+  streamlit_bookkeeping.py  # 网页端 DeepSeek 草稿、确认与写入
   deepseek_reports.py       # DeepSeek 财务报告 Prompt 与本地回退
   reporting.py              # 日报、月报和标签分析数据构建
   advance_payment.py        # 个人垫付识别、排除和余额计算

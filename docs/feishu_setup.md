@@ -92,6 +92,9 @@ AI_PARSER_REQUIRE_CONFIRMATION=true
 AI_PARSER_TIMEOUT_SECONDS=15
 AI_PARSER_COMPLEX_MAX_TOKENS=2400
 AI_PARSER_FALLBACK_TO_LOCAL=true
+INVALID_DATA_CLEANUP_ENABLED=true
+INVALID_DATA_CLEANUP_HOUR=3
+INVALID_DATA_RETENTION_DAYS=30
 ```
 
 多个白名单 ID 使用英文逗号分隔。群聊中机器人仅在被 @ 时响应。
@@ -168,6 +171,15 @@ SQLite 是主数据源。飞书同步失败不会回滚本地账单，scheduler 
 ## 10. AI 解析与隐私
 
 - 仅当 `AI_PARSER_ENABLED=true` 且配置了密钥时，才会调用兼容 OpenAI 的 DeepSeek 接口。
+- Streamlit 记账强制使用 DeepSeek：先展示结构化草稿，确认后才写入；AI 不可用时不会退回本地规则直接记账。
+- 常规输入使用 `DEEPSEEK_MODEL`，复杂输入或结构不完整时自动使用 `DEEPSEEK_COMPLEX_MODEL` 重试一次。
+
+## 11. 定期清理无效数据
+
+- scheduler 每日到达 `INVALID_DATA_CLEANUP_HOUR` 后执行一次清理，默认凌晨 3 点。
+- 自动删除范围仅包括：明确测试 UID、日期/类型/金额等关键结构非法的行，以及超过 `INVALID_DATA_RETENTION_DAYS` 且已同步的软删除行。
+- 有 `feishu_record_id` 的记录必须先成功删除飞书行，之后才删除 SQLite 行；远端失败时保留本地记录，避免数据失配。
+- 清理结果只记录数量、UID 前缀和原因，不记录完整账单描述。
 
 ## DeepSeek 智能对话边界
 

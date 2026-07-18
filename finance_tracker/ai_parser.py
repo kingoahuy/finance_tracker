@@ -137,6 +137,7 @@ def parse_action(
     client=None,
     config=None,
     context=None,
+    ai_only=False,
 ):
     config = config or get_ai_parser_config()
     text = str(text or "").strip()
@@ -148,7 +149,7 @@ def parse_action(
         return _unknown("empty")
 
     recurring_records = parse_recurring_entry_text(text, base_date)
-    if recurring_records:
+    if recurring_records and not ai_only:
         action = _simple_action("create_transactions", "deterministic_recurrence")
         action["confidence"] = 0.98
         action["transactions"] = recurring_records
@@ -158,6 +159,8 @@ def parse_action(
         return action
 
     if not config["enabled"] or not config["api_key"]:
+        if ai_only:
+            return _unknown("deepseek_disabled_or_unconfigured")
         return _local_action(
             text, base_date, "disabled_or_unconfigured", safe_context
         )
@@ -166,7 +169,7 @@ def parse_action(
         ai_client = client or _build_client(config)
     except Exception as exc:
         LOGGER.warning("AI client unavailable: error_type=%s", type(exc).__name__)
-        if config["fallback_to_local"]:
+        if config["fallback_to_local"] and not ai_only:
             return _local_action(text, base_date, "ai_client_error", safe_context)
         return _unknown("ai_client_error")
     action, first_error = _call_ai_model(
@@ -181,7 +184,11 @@ def parse_action(
     quality_reason = _action_quality_issue(action, text, base_date)
     is_complex = _is_complex_text(text)
 
-    if quality_reason and is_complex and config.get("complex_model_enabled", True):
+    if (
+        quality_reason
+        and (is_complex or ai_only)
+        and config.get("complex_model_enabled", True)
+    ):
         complex_model = str(config.get("complex_model") or "deepseek-v4-pro")
         if complex_model and complex_model != config["model"]:
             action, complex_error = _call_ai_model(
@@ -205,6 +212,10 @@ def parse_action(
             and not looks_like_recurring_entry(text)
             and parse_entry_text(text, base_date)
         ):
+            if ai_only:
+                action["parser"] = "ai"
+                action.setdefault("model_tier", "flash")
+                return action
             return _local_action(
                 text,
                 base_date,
@@ -220,7 +231,7 @@ def parse_action(
         return action
 
     fallback_reason = quality_reason or first_error or "ai_error"
-    if config["fallback_to_local"]:
+    if config["fallback_to_local"] and not ai_only:
         return _local_action(text, base_date, fallback_reason, safe_context)
     return _unknown(fallback_reason)
 

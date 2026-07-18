@@ -65,6 +65,8 @@ Finance Tracker Pro is designed around a simpler workflow:
 | Bitable sync | Sync transaction facts and daily metric snapshots for MTD/YTD, rolling averages, and budget pacing |
 | Complete scene tags | Keep tags compact and evidence-backed, with explicit category-scene fallbacks so active historical rows are never untagged |
 | Batch reconciliation | Batch-create/update transactions by UID, then read Feishu back and compare core fields and tags |
+| DeepSeek web bookkeeping | Use the same Flash-to-Pro parsing policy as Feishu and write only after draft confirmation |
+| Scheduled invalid-row cleanup | Conservatively remove test/structurally invalid rows and synced soft deletes after retention |
 | Dashboard-safe measures | Use additive income, expense, need/want, and fixed/variable fields without rebuilding filters |
 | Non-blocking incremental sync | Queue, claim, retry, and recover sync jobs without delaying user-facing bookkeeping replies |
 | Scheduler | Run automated reports, daily metric snapshots, sync tasks, and background services |
@@ -77,6 +79,8 @@ Finance Tracker Pro is designed around a simpler workflow:
 - Excluded personal advances from ordinary income, expense, budget, category, tag, and trend metrics while reporting them separately across Streamlit, email, Feishu, and DeepSeek reports.
 - Added sync-job claiming and stale-job recovery to reduce duplicate processing across background workers.
 - Added full UID-based Bitable reconciliation and read-back consistency checks for historical tag or field migrations.
+- Switched Streamlit bookkeeping to DeepSeek-only parsing with explicit confirmation and no silent local fallback.
+- Added daily remote-first cleanup so deleting stale invalid rows cannot create Feishu orphans.
 - Added configurable output-token limits for AI parsing and DeepSeek reports.
 
 ---
@@ -297,9 +301,11 @@ finance_tracker/
   tagging.py                # Category and tag management
   email_service.py          # Email report generation and SMTP delivery
   scheduler.py              # Background scheduler
+  data_cleanup.py           # Conservative local/Feishu invalid-row cleanup
   account_ops.py            # CLI utilities
   service_runner.py         # Process management
   ai_parser.py              # DeepSeek natural language parser
+  streamlit_bookkeeping.py  # DeepSeek draft, confirmation, and web write path
   advance_payment.py        # Personal-advance classification and balance logic
   dashboard_metrics.py      # Daily MTD/YTD dashboard snapshots
   transaction_service.py    # Transaction parsing, validation, and operations

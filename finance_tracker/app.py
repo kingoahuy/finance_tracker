@@ -40,8 +40,12 @@ from ledger import (
     load_transactions,
     update_transactions_from_editor,
 )
-from transaction_service import create_transactions_from_text
 from transaction_service import schedule_pending_sync
+from streamlit_bookkeeping import (
+    commit_web_bookkeeping,
+    parse_web_bookkeeping,
+    preview_web_action,
+)
 
 # ================= 1. 核心配置 =================
 st.set_page_config(page_title="智账 Pro", layout="centered", page_icon="💸")
@@ -180,7 +184,7 @@ def main():
     # --- 1. 记账 ---
     if selected == "记账":
         st.markdown("<h2 style='text-align:center;'>今天记账了？</h2>", unsafe_allow_html=True)
-        st.caption("💡 本地识别，不调用外部 AI。多条记录请换行输入，例如：买咖啡20")
+        st.caption("💡 使用 DeepSeek 智能解析，与飞书记账一致；生成草稿后需要确认才会写入。")
 
         with st.container():
             st.markdown('<div class="big-input">', unsafe_allow_html=True)
@@ -188,25 +192,43 @@ def main():
             st.markdown('</div>', unsafe_allow_html=True)
 
             if st.button("发送 🚀", type="primary", width="stretch") and user_input:
-                with st.spinner("正在解析并写入本地账本..."):
-                    items = create_transactions_from_text(user_input, source="streamlit")
-                    if items:
-                        for item in items:
-                            is_income = item.get('type') == '收入'
-                            color = "green" if is_income else "red"
-                            symbol = "+" if is_income else "-"
+                with st.spinner("正在调用 DeepSeek 解析记账信息..."):
+                    parsed = parse_web_bookkeeping(user_input)
+                if parsed.get("success"):
+                    st.session_state["web_pending_bookkeeping"] = parsed["action"]
+                elif parsed.get("needs_clarification"):
+                    st.warning(parsed["message"])
+                else:
+                    st.error(parsed["message"])
 
-                            with st.chat_message("assistant", avatar="🧾"):
-                                st.markdown(f"""
-                                <div style="font-size: 20px; font-weight: bold; color: {color};">
-                                    {symbol} {item.get('amount', 0)} <span style="font-size:14px;color:#666">({item.get('category')})</span>
-                                </div>
-                                <div style="color:#888;font-size:14px">📝 {item.get('description')}</div>
-                                """, unsafe_allow_html=True)
-                                if item.get("local_comment"): st.info(f"💡 {item['local_comment']}")
-                        st.session_state['refresh'] = True
-                    else:
-                        st.error("没听懂...请明确金额和事项")
+            pending_web_action = st.session_state.get("web_pending_bookkeeping")
+            if pending_web_action:
+                tier = pending_web_action.get("model_tier", "flash")
+                st.info(
+                    f"DeepSeek {'Pro' if tier == 'pro' else 'Flash'} 已生成草稿，"
+                    "请检查日期、收支、金额、分类和标签。"
+                )
+                st.dataframe(
+                    pd.DataFrame(preview_web_action(pending_web_action)),
+                    hide_index=True,
+                    width="stretch",
+                )
+                confirm_col, cancel_col = st.columns(2)
+                with confirm_col:
+                    if st.button("✅ 确认记账", type="primary", width="stretch"):
+                        action_to_commit = st.session_state.pop("web_pending_bookkeeping")
+                        try:
+                            with st.spinner("正在写入账本并排队同步飞书..."):
+                                items = commit_web_bookkeeping(action_to_commit)
+                            st.success(f"已记账 {len(items)} 笔，并已进入飞书同步队列。")
+                            st.session_state["refresh"] = True
+                        except Exception as exc:
+                            st.session_state["web_pending_bookkeeping"] = action_to_commit
+                            st.error(f"记账失败：{type(exc).__name__}，请稍后重试。")
+                with cancel_col:
+                    if st.button("取消", width="stretch"):
+                        st.session_state.pop("web_pending_bookkeeping", None)
+                        st.info("已取消，本次内容未写入账本。")
 
     # --- 2. 看板 ---
     elif selected == "看板":
