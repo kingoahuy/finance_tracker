@@ -281,7 +281,7 @@ def _retag_transactions(apply, only_empty, limit_examples):
                         WHERE NOT EXISTS (
                             SELECT 1 FROM sync_outbox
                             WHERE transaction_uid = ?
-                              AND status IN ('pending', 'in_progress')
+                              AND status IN ('pending', 'processing', 'in_progress')
                         )
                         """,
                         (item["transaction_uid"], item["transaction_uid"]),
