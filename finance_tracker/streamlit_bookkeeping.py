@@ -13,7 +13,7 @@ def parse_web_bookkeeping(text, default_date=None, parser=None):
     action = (parser or parse_action)(
         text,
         default_date=default_date,
-        context={},
+        context={"task_mode": "bookkeeping_only"},
         ai_only=True,
     )
     intent = str(action.get("intent") or "unknown")
@@ -41,8 +41,14 @@ def parse_web_bookkeeping(text, default_date=None, parser=None):
     reason = str(action.get("reason") or "")
     if reason == "deepseek_disabled_or_unconfigured":
         message = "DeepSeek 未启用或未配置 API Key，网页端不会退回本地识别。"
+    elif reason == "ai_timeout":
+        message = "DeepSeek Pro 本次响应超时，没有写入账本；请直接重试一次。"
+    elif reason == "invalid_json":
+        message = "DeepSeek 本次返回格式异常，没有写入账本；请直接重试一次。"
+    elif reason == "low_confidence":
+        message = "DeepSeek 对这条内容把握不足，请补充明确的金额和事项后重试。"
     else:
-        message = "DeepSeek 暂未生成可靠的记账草稿，请补充信息后重试。"
+        message = "DeepSeek 暂未生成可校验的记账草稿，没有写入账本；请重试或补充信息。"
     return {"success": False, "action": action, "message": message}
 
 

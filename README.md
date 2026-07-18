@@ -199,7 +199,7 @@ http://127.0.0.1:8501
 | 飞书机器人 | `FEISHU_APP_ID` / `FEISHU_APP_SECRET` | 飞书自建应用凭证 |
 | 飞书权限 | `FEISHU_ALLOWED_OPEN_IDS` / `FEISHU_ALLOWED_CHAT_IDS` | 允许使用机器人的用户或群聊白名单 |
 | 多维表格 | `FEISHU_BITABLE_APP_TOKEN` / `FEISHU_BITABLE_TABLE_ID` | 飞书多维表格同步配置 |
-| AI 解析 | `DEEPSEEK_API_KEY` / `DEEPSEEK_MODEL` / `DEEPSEEK_COMPLEX_MODEL` | DeepSeek 常规模型与复杂输入升级模型，可选 |
+| AI 解析 | `DEEPSEEK_API_KEY` / `DEEPSEEK_MODEL` / `DEEPSEEK_COMPLEX_MODEL` / `AI_PARSER_COMPLEX_TIMEOUT_SECONDS` | DeepSeek 常规模型、复杂输入升级模型及 Pro 独立超时 |
 | 无效数据清理 | `INVALID_DATA_CLEANUP_ENABLED` / `INVALID_DATA_CLEANUP_HOUR` / `INVALID_DATA_RETENTION_DAYS` | 默认每日 03:00 清理，软删除保留 30 天 |
 
 > 完整配置以 `.env.example` 为准。不要把真实 `.env`、邮箱授权码、飞书 token、账本数据库提交到 GitHub。

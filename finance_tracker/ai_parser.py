@@ -114,6 +114,17 @@ def get_ai_parser_config():
                 60,
             ),
         ),
+        "complex_timeout": max(
+            5,
+            min(
+                int(
+                    os.getenv(
+                        "AI_PARSER_COMPLEX_TIMEOUT_SECONDS", "35"
+                    ) or "35"
+                ),
+                90,
+            ),
+        ),
         "max_tokens": max(
             128,
             min(
@@ -181,7 +192,12 @@ def parse_action(
         timeout=config["timeout"],
         max_tokens=int(config.get("max_tokens", 800)),
     )
-    quality_reason = _action_quality_issue(action, text, base_date)
+    quality_reason = _action_quality_issue(
+        action,
+        text,
+        base_date,
+        strict_bookkeeping=ai_only,
+    )
     is_complex = _is_complex_text(text)
 
     if (
@@ -191,20 +207,30 @@ def parse_action(
     ):
         complex_model = str(config.get("complex_model") or "deepseek-v4-pro")
         if complex_model and complex_model != config["model"]:
+            retry_context = _ai_retry_context(
+                safe_context,
+                text,
+                base_date,
+                quality_reason,
+            )
             action, complex_error = _call_ai_model(
                 ai_client,
                 text,
                 base_date,
-                safe_context,
+                retry_context,
                 model=complex_model,
-                timeout=config["timeout"],
+                timeout=int(config.get("complex_timeout", 35)),
                 max_tokens=int(config.get("complex_max_tokens", 2400)),
             )
-            quality_reason = _action_quality_issue(action, text, base_date)
+            quality_reason = _action_quality_issue(
+                action,
+                text,
+                base_date,
+                strict_bookkeeping=ai_only,
+            )
             if action is not None:
                 action["model_tier"] = "pro"
-            if complex_error:
-                first_error = complex_error
+            first_error = complex_error
 
     if action is not None and not quality_reason:
         if (
@@ -230,7 +256,7 @@ def parse_action(
         )
         return action
 
-    fallback_reason = quality_reason or first_error or "ai_error"
+    fallback_reason = first_error or quality_reason or "ai_error"
     if config["fallback_to_local"] and not ai_only:
         return _local_action(text, base_date, fallback_reason, safe_context)
     return _unknown(fallback_reason)
@@ -238,13 +264,18 @@ def parse_action(
 
 def _call_ai_model(client, text, base_date, safe_context, model, timeout, max_tokens):
     try:
+        system_prompt = (
+            _bookkeeping_system_prompt(base_date)
+            if safe_context.get("task_mode") == "bookkeeping_only"
+            else _system_prompt(base_date)
+        )
         response = client.chat.completions.create(
             model=model,
             timeout=timeout,
             max_tokens=max_tokens,
             response_format={"type": "json_object"},
             messages=[
-                {"role": "system", "content": _system_prompt(base_date)},
+                {"role": "system", "content": system_prompt},
                 {
                     "role": "user",
                     "content": json.dumps(
@@ -258,19 +289,49 @@ def _call_ai_model(client, text, base_date, safe_context, model, timeout, max_to
             ],
         )
         raw = response.choices[0].message.content
-        action = validate_action(json.loads(raw), base_date)
+        action = validate_action(_decode_ai_json(raw), base_date)
         _audit(text, action, f"ai:{model}")
         return action, ""
     except Exception as exc:
+        error_type = type(exc).__name__
         LOGGER.warning(
             "AI parser failed: model=%s error_type=%s",
             model,
-            type(exc).__name__,
+            error_type,
         )
+        if error_type in {"APITimeoutError", "TimeoutError"}:
+            return None, "ai_timeout"
+        if isinstance(exc, json.JSONDecodeError):
+            return None, "invalid_json"
         return None, "ai_error"
 
 
-def _action_quality_issue(action, text, base_date):
+def _decode_ai_json(raw):
+    """Decode a JSON object without logging or exposing the model response."""
+    if isinstance(raw, dict):
+        return raw
+    text = str(raw or "").strip().lstrip("\ufeff")
+    fenced = re.fullmatch(
+        r"```(?:json)?\s*(.*?)\s*```",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if fenced:
+        text = fenced.group(1).strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as original_error:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end > start:
+            try:
+                return json.loads(text[start:end + 1])
+            except json.JSONDecodeError:
+                pass
+        raise original_error
+
+
+def _action_quality_issue(action, text, base_date, strict_bookkeeping=False):
     if action is None:
         return "ai_error"
     if (
@@ -278,6 +339,13 @@ def _action_quality_issue(action, text, base_date):
         and action["intent"] not in {"ask_clarification", "chat"}
     ):
         return "low_confidence"
+    if (
+        strict_bookkeeping
+        and action["intent"] == "ask_clarification"
+        and not looks_like_recurring_entry(text)
+        and parse_entry_text(text, base_date)
+    ):
+        return "unnecessary_clarification"
     if looks_like_recurring_entry(text):
         if action["intent"] == "ask_clarification":
             return "complex_needs_stronger_parse"
@@ -304,6 +372,26 @@ def _action_quality_issue(action, text, base_date):
         ):
             return "multiple_transactions_incomplete"
     return ""
+
+
+def _ai_retry_context(safe_context, text, base_date, quality_reason):
+    """Give Pro bounded deterministic facts to validate, never to write directly."""
+    context = dict(safe_context or {})
+    context["retry_reason"] = str(quality_reason or "")[:80]
+    candidates = parse_recurring_entry_text(text, base_date)
+    if not candidates:
+        candidates = parse_entry_text(text, base_date)
+    context["candidate_transactions"] = [
+        {
+            key: row.get(key)
+            for key in (
+                "date", "type", "category", "amount", "description",
+                "tags", "is_need", "is_fixed",
+            )
+        }
+        for row in candidates[:100]
+    ]
+    return context
 
 
 def _is_complex_text(text):
@@ -817,6 +905,11 @@ def _safe_context(context):
             )
         }
     return {
+        "task_mode": (
+            "bookkeeping_only"
+            if context.get("task_mode") == "bookkeeping_only"
+            else ""
+        ),
         "pending_question": str(
             context.get("pending_question") or ""
         )[:160],
@@ -961,6 +1054,56 @@ category 只能是：{categories}
     “7月1日到7月5日每天午饭20元”展开5笔。不要生成当前日期之后的流水。
 18. 如果重复周期、发生频率、每次金额或收支方向不明确，使用 ask_clarification；
     单次最多展开100笔，不要臆造缺失条件。餐补、交通补贴、住房补贴归类为补贴收入。
+19. conversation_context.task_mode=bookkeeping_only 时，当前入口只用于新增记账：
+    有完整金额和事项时优先 create_transactions；信息不足时 ask_clarification；
+    不要返回 chat、查询、同步、修改或删除意图。简短口语也按记账语句理解，但不得臆造缺失金额。
+20. conversation_context.candidate_transactions 只在 Flash 结果不可靠后提供给 Pro；
+    它是由确定性规则生成的有限候选。请结合用户原文逐笔验证、修正并返回完整 JSON，
+    不得省略实际发生日期，也不得添加原文和候选都不支持的交易。
+""".strip()
+
+
+def _bookkeeping_system_prompt(base_date):
+    categories = "、".join(CATEGORIES)
+    return f"""
+你是个人记账工具的结构化解析器。当前入口只用于新增收入或支出草稿。
+你不能写数据库，只能返回一个 JSON 对象；不要 Markdown、代码块、解释或 JSON 之外的文字。
+
+当前日期：{base_date}
+category 只能是：{categories}
+intent 只能是 create_transactions 或 ask_clarification。
+
+固定 JSON：
+{{
+  "intent": "create_transactions",
+  "confidence": 0.95,
+  "reply": "",
+  "clarification_question": "",
+  "transactions": [{{
+    "date": "YYYY-MM-DD",
+    "type": "支出",
+    "category": "其他",
+    "amount": 0,
+    "description": "",
+    "tags": [],
+    "is_need": false,
+    "is_fixed": false
+  }}],
+  "requires_confirmation": true
+}}
+
+规则：
+1. 只要原文包含明确事项和大于0的金额，就生成 create_transactions，不要重复追问金额。
+2. 日期缺失默认 {base_date}；不得生成 {base_date} 之后的流水。
+3. 收到、工资、奖金、补贴、报销、退款等通常为收入；购买、支付、花费等通常为支出。
+4. 多个事项分别生成多笔，不要合并遗漏。
+5. 重复发生的收支按已经发生的日期逐笔展开，最多100笔。例如本周每天、上周工作日、明确日期区间。
+6. 金额、频率、周期或收支方向确实缺失时才返回 ask_clarification，并提出一个具体问题。
+7. conversation_context.candidate_transactions 是确定性规则提供的候选，只用于校验和修正；
+   与原文一致时完整保留，冲突时以原文为准，不得添加两者都不支持的事实。
+8. tags 最多3个，只写原文能证明的消费场景、收入来源或明确项目；不要写星期、金额档位或分类名。
+9. is_need、is_fixed 只能按原文和常识谨慎判断；不确定时返回 false。
+10. 信息充分时 confidence 应不低于0.85；不要因为口语简短而返回 unknown 或 chat。
 """.strip()
 
 

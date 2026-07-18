@@ -31,6 +31,7 @@ class StreamlitBookkeepingTest(unittest.TestCase):
 
         self.assertTrue(result["success"])
         self.assertTrue(calls["ai_only"])
+        self.assertEqual(calls["context"], {"task_mode": "bookkeeping_only"})
         self.assertEqual(result["action"]["model_tier"], "pro")
 
     def test_confirmed_ai_draft_is_written_as_streamlit_deepseek(self):

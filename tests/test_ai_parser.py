@@ -32,6 +32,17 @@ class SequenceCompletions:
         return SimpleNamespace(choices=[SimpleNamespace(message=message)])
 
 
+class RawCompletions:
+    def __init__(self, content):
+        self.content = content
+        self.kwargs = None
+
+    def create(self, **kwargs):
+        self.kwargs = kwargs
+        message = SimpleNamespace(content=self.content)
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+
 class AiParserTest(unittest.TestCase):
     def _client(self, completions):
         return SimpleNamespace(chat=SimpleNamespace(completions=completions))
@@ -69,6 +80,81 @@ class AiParserTest(unittest.TestCase):
         self.assertEqual(result["parser"], "ai")
         self.assertTrue(result["need_confirmation"])
         self.assertEqual(completions.kwargs["response_format"], {"type": "json_object"})
+
+    def test_bookkeeping_mode_uses_narrow_system_prompt(self):
+        completions = FakeCompletions(
+            {
+                "intent": "create_transactions",
+                "confidence": 0.95,
+                "transactions": [
+                    {
+                        "date": "2026-07-18",
+                        "type": "支出",
+                        "category": "餐饮",
+                        "amount": 20,
+                        "description": "午饭",
+                    }
+                ],
+            }
+        )
+        result = ai_parser.parse_action(
+            "午饭20",
+            default_date="2026-07-18",
+            ai_only=True,
+            context={"task_mode": "bookkeeping_only"},
+            client=self._client(completions),
+            config={
+                "enabled": True,
+                "require_confirmation": True,
+                "fallback_to_local": False,
+                "api_key": "test",
+                "base_url": "https://example.invalid",
+                "model": "test-model",
+                "timeout": 3,
+            },
+        )
+        prompt = completions.kwargs["messages"][0]["content"]
+        self.assertEqual(result["intent"], "create_transactions")
+        self.assertIn("当前入口只用于新增收入或支出草稿", prompt)
+        self.assertNotIn("sync_bitable", prompt)
+
+    def test_json_code_fence_is_decoded_without_exposing_raw_response(self):
+        completions = RawCompletions(
+            "```json\n"
+            + json.dumps(
+                {
+                    "intent": "create_transactions",
+                    "confidence": 0.95,
+                    "transactions": [
+                        {
+                            "date": "2026-07-18",
+                            "type": "支出",
+                            "category": "餐饮",
+                            "amount": 20,
+                            "description": "午饭",
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            )
+            + "\n```"
+        )
+        result = ai_parser.parse_action(
+            "午饭20",
+            default_date="2026-07-18",
+            client=self._client(completions),
+            config={
+                "enabled": True,
+                "require_confirmation": True,
+                "fallback_to_local": False,
+                "api_key": "test",
+                "base_url": "https://example.invalid",
+                "model": "test-model",
+                "timeout": 3,
+            },
+        )
+        self.assertEqual(result["intent"], "create_transactions")
+        self.assertEqual(result["parser"], "ai")
 
     def test_ai_tag_guesses_are_replaced_by_evidence_backed_tags(self):
         completions = FakeCompletions(
@@ -182,6 +268,7 @@ class AiParserTest(unittest.TestCase):
                 "complex_model": "deepseek-v4-pro",
                 "complex_model_enabled": True,
                 "timeout": 3,
+                "complex_timeout": 11,
                 "max_tokens": 800,
                 "complex_max_tokens": 2400,
             },
@@ -192,6 +279,55 @@ class AiParserTest(unittest.TestCase):
             [call["model"] for call in completions.calls],
             ["deepseek-v4-flash", "deepseek-v4-pro"],
         )
+        self.assertEqual(completions.calls[1]["timeout"], 11)
+        retry_payload = json.loads(completions.calls[1]["messages"][1]["content"])
+        retry_context = retry_payload["conversation_context"]
+        self.assertEqual(retry_context["retry_reason"], "low_confidence")
+        self.assertEqual(len(retry_context["candidate_transactions"]), 1)
+
+    def test_ai_only_unnecessary_clarification_retries_with_pro(self):
+        transaction = {
+            "date": "2026-07-18",
+            "type": "支出",
+            "category": "餐饮",
+            "amount": 20,
+            "description": "午饭",
+        }
+        completions = SequenceCompletions(
+            [
+                {
+                    "intent": "ask_clarification",
+                    "confidence": 0.95,
+                    "clarification_question": "金额是多少？",
+                    "transactions": [],
+                },
+                {
+                    "intent": "create_transactions",
+                    "confidence": 0.95,
+                    "transactions": [transaction],
+                },
+            ]
+        )
+        result = ai_parser.parse_action(
+            "午饭20",
+            default_date="2026-07-18",
+            ai_only=True,
+            client=self._client(completions),
+            config={
+                "enabled": True,
+                "require_confirmation": True,
+                "fallback_to_local": True,
+                "api_key": "test",
+                "base_url": "https://example.invalid",
+                "model": "deepseek-v4-flash",
+                "complex_model": "deepseek-v4-pro",
+                "complex_model_enabled": True,
+                "timeout": 3,
+                "complex_timeout": 11,
+            },
+        )
+        self.assertEqual(result["intent"], "create_transactions")
+        self.assertEqual(result["model_tier"], "pro")
 
     def test_flash_incomplete_complex_recurrence_retries_with_pro(self):
         dates = [f"2026-07-{day:02d}" for day in range(6, 11)]
