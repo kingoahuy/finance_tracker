@@ -109,6 +109,19 @@ DASHBOARD_TRANSACTION_KEYS = (
     "variable_expense_amount",
     "data_version",
 )
+CORE_RECONCILIATION_KEYS = (
+    "id",
+    "date",
+    "type",
+    "category",
+    "amount",
+    "description",
+    "tags",
+    "tags_text",
+    "is_need",
+    "is_fixed",
+    "status",
+)
 _FIELD_PREFLIGHT_CACHE = set()
 
 
@@ -1376,6 +1389,139 @@ def full_sync(service=None, progress_callback=None):
     return _attach_dashboard_result(summary, dashboard)
 
 
+def reconcile_all_transactions(service=None):
+    """Batch-reconcile every local transaction to Feishu and close stale jobs."""
+    init_db()
+    config = service.config if service is not None else get_feishu_config()
+    disabled = _sync_disabled_result(config)
+    if disabled:
+        return {**disabled, "created": 0, "updated": 0}
+    preflight = _prepare_sync_fields(service=service, config=config)
+    if not preflight.get("success"):
+        return {**preflight, "created": 0, "updated": 0}
+    service = service or BitableSyncService(config=config)
+    local_by_uid = _load_transactions_for_sync()
+    remote_result = service.list_records(table_id=config.bitable_table_id)
+    if not remote_result.get("success"):
+        return {**_one_result(remote_result), "created": 0, "updated": 0}
+
+    remote_groups = defaultdict(list)
+    for record in remote_result.get("records") or []:
+        uid = _record_uid(record)
+        if uid:
+            remote_groups[uid].append(record)
+    duplicates = {uid: rows for uid, rows in remote_groups.items() if len(rows) > 1}
+    if duplicates:
+        return {
+            "success": False,
+            "code": -2,
+            "message": "飞书存在重复交易UID，请先完成去重。",
+            "log_id": str(remote_result.get("log_id") or ""),
+            "created": 0,
+            "updated": 0,
+            "duplicate_uid_count": len(duplicates),
+        }
+
+    remote_by_uid = {uid: rows[0] for uid, rows in remote_groups.items()}
+    create_rows = []
+    update_rows = []
+    for uid, transaction in local_by_uid.items():
+        fields = transaction_to_bitable_fields(transaction)
+        remote = remote_by_uid.get(uid)
+        if remote:
+            update_rows.append((remote["record_id"], fields))
+        else:
+            create_rows.append(fields)
+
+    errors = []
+    created = updated = 0
+    for batch in _chunks(update_rows, 500):
+        result = service.batch_update_records(config.bitable_table_id, batch)
+        if result.get("success"):
+            updated += len(batch)
+        else:
+            errors.append(_format_api_error(result))
+            break
+    if not errors:
+        for batch in _chunks(create_rows, 500):
+            result = service.batch_create_records(config.bitable_table_id, batch)
+            if result.get("success"):
+                created += len(batch)
+            else:
+                errors.append(_format_api_error(result))
+                break
+    if errors:
+        return {
+            "success": False,
+            "code": -1,
+            "message": "交易底表批量对账失败：" + "；".join(errors),
+            "log_id": str(remote_result.get("log_id") or ""),
+            "created": created,
+            "updated": updated,
+            "errors": errors,
+        }
+
+    verified_result = service.list_records(table_id=config.bitable_table_id)
+    if not verified_result.get("success"):
+        return {
+            **_one_result(verified_result),
+            "message": "写入成功，但飞书回读验证失败。",
+            "created": created,
+            "updated": updated,
+        }
+    verified_by_uid = {
+        _record_uid(record): record
+        for record in verified_result.get("records") or []
+        if _record_uid(record)
+    }
+    missing_after = sorted(set(local_by_uid) - set(verified_by_uid))
+    if missing_after:
+        return {
+            "success": False,
+            "code": -3,
+            "message": "批量写入后仍有本地流水未在飞书回读到。",
+            "log_id": str(verified_result.get("log_id") or ""),
+            "created": created,
+            "updated": updated,
+            "missing_after_count": len(missing_after),
+            "missing_after_uid_examples": [uid[:8] for uid in missing_after[:10]],
+        }
+
+    with connect() as conn:
+        for uid, record in verified_by_uid.items():
+            if uid not in local_by_uid:
+                continue
+            conn.execute(
+                """
+                UPDATE transactions
+                SET sync_status = 'synced', sync_error = '', feishu_record_id = ?
+                WHERE transaction_uid = ?
+                """,
+                (record["record_id"], uid),
+            )
+        conn.execute(
+            """
+            UPDATE sync_outbox
+            SET status = 'done', last_error = '', updated_at = CURRENT_TIMESTAMP
+            WHERE transaction_uid IN (
+                SELECT transaction_uid FROM transactions
+            ) AND status IN ('pending', 'failed', 'processing')
+            """
+        )
+    return {
+        "success": True,
+        "code": 0,
+        "message": f"交易底表批量对账完成：新增 {created}，更新 {updated}。",
+        "log_id": str(verified_result.get("log_id") or ""),
+        "local_total": len(local_by_uid),
+        "remote_total": len(verified_by_uid),
+        "created": created,
+        "updated": updated,
+        "missing_after_count": 0,
+        "errors": [],
+    }
+
+
 def sync_one_pending(service=None):
     init_db()
     config = service.config if service is not None else get_feishu_config()
@@ -1570,12 +1716,10 @@ def audit_remote(service=None):
         return _one_result(remote_result)
 
     remote_records = remote_result.get("records") or []
+    local_by_uid = _load_transactions_for_sync()
     with connect() as conn:
         local_rows = conn.execute(
-            """
-            SELECT transaction_uid, feishu_record_id
-            FROM transactions
-            """
+            "SELECT transaction_uid, feishu_record_id FROM transactions"
         ).fetchall()
     local_uids = {
         str(row[0]).strip()
@@ -1607,6 +1751,28 @@ def audit_remote(service=None):
     remote_uids = set(remote_uid_records)
     orphan_uids = sorted(remote_uids - local_uids)
     missing_remote_uids = sorted(local_uids - remote_uids)
+    shared_uids = sorted(local_uids & remote_uids)
+    field_mismatch_counts = defaultdict(int)
+    mismatch_examples = []
+    mismatched_uids = []
+    for uid in shared_uids:
+        expected = transaction_to_bitable_fields(local_by_uid[uid])
+        actual = remote_uid_records[uid][0].get("fields", {})
+        mismatched_fields = []
+        for key in CORE_RECONCILIATION_KEYS:
+            label = FIELD_MAP[key]
+            if not _reconciliation_field_equal(key, expected.get(label), actual.get(label)):
+                mismatched_fields.append(key)
+                field_mismatch_counts[key] += 1
+        if mismatched_fields:
+            mismatched_uids.append(uid)
+            if len(mismatch_examples) < 10:
+                mismatch_examples.append(
+                    {
+                        "transaction_uid_prefix": uid[:8],
+                        "fields": mismatched_fields,
+                    }
+                )
     obvious_test_ids = {
         record["record_id"]
         for record in _test_records(remote_records)
@@ -1628,6 +1794,8 @@ def audit_remote(service=None):
         ),
         "remote_orphan_uid_count": len(orphan_uids),
         "local_missing_remote_uid_count": len(missing_remote_uids),
+        "core_field_mismatch_record_count": len(mismatched_uids),
+        "core_field_mismatch_counts": dict(sorted(field_mismatch_counts.items())),
         "remote_test_uid_count": len(test_uid_records),
         "remote_permission_test_count": len(permission_test_records),
         "remote_obvious_test_record_count": len(obvious_test_ids),
@@ -1670,7 +1838,70 @@ def audit_remote(service=None):
         "local_missing_remote_uid_examples": [
             uid[:8] for uid in missing_remote_uids[:10]
         ],
+        "core_field_mismatch_examples": mismatch_examples,
     }
+
+
+def _load_transactions_for_sync():
+    with connect() as conn:
+        cursor = conn.execute("SELECT * FROM transactions ORDER BY rowid ASC")
+        columns = [item[0] for item in cursor.description]
+        rows = cursor.fetchall()
+    result = {}
+    for row in rows:
+        transaction = enrich_transaction_fields(dict(zip(columns, row)))
+        uid = str(transaction.get("transaction_uid") or "").strip()
+        if uid:
+            result[uid] = transaction
+    return result
+
+
+def _reconciliation_field_equal(key, expected, actual):
+    if key == "tags":
+        return set(_normalized_tag_values(expected)) == set(_normalized_tag_values(actual))
+    if key in {"id", "date"}:
+        try:
+            return int(float(expected or 0)) == int(float(_field_text(actual) or 0))
+        except (TypeError, ValueError):
+            return False
+    if key == "amount":
+        try:
+            return abs(float(expected or 0) - float(_field_text(actual) or 0)) < 0.005
+        except (TypeError, ValueError):
+            return False
+    if key in {"is_need", "is_fixed"}:
+        return bool(expected) == _field_bool(actual)
+    return str(expected or "").strip() == _field_text(actual)
+
+
+def _normalized_tag_values(value):
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        for key in ("text", "name", "value"):
+            if key in value:
+                return _normalized_tag_values(value[key])
+        return []
+    if isinstance(value, (list, tuple, set)):
+        result = []
+        for item in value:
+            for tag in _normalized_tag_values(item):
+                if tag not in result:
+                    result.append(tag)
+        return result
+    result = []
+    for item in re.split(r"[,，、;；|]+", str(value or "")):
+        tag = item.strip()
+        if tag and tag not in result:
+            result.append(tag)
+    return result
+
+
+def _field_bool(value):
+    if isinstance(value, bool):
+        return value
+    text = _field_text(value).lower()
+    return text in {"1", "true", "yes", "是", "checked"}
 
 
 def dedupe_remote(apply=False, service=None):
@@ -2975,6 +3206,7 @@ def main():
     group.add_argument("--one", action="store_true")
     group.add_argument("--pending", action="store_true")
     group.add_argument("--full", action="store_true")
+    group.add_argument("--reconcile-all", action="store_true")
     group.add_argument("--reset-failed", action="store_true")
     group.add_argument("--audit-remote", action="store_true")
     group.add_argument("--dedupe-remote", action="store_true")
@@ -3044,6 +3276,9 @@ def main():
             flush=True,
         )
         result = full_sync(progress_callback=_print_cli_event)
+    elif args.reconcile_all:
+        print("[开始] 批量对账本地账本与飞书原始数据表。", flush=True)
+        result = reconcile_all_transactions()
     elif args.reset_failed:
         result = reset_failed_sync()
     elif args.audit_remote:

@@ -144,6 +144,12 @@ AI_PARSER_FALLBACK_TO_LOCAL=true
 
 # 幂等全量同步
 .\.venv\Scripts\python.exe -m finance_tracker.bitable_sync --full
+
+# 历史标签或字段治理后的批量对账
+.\.venv\Scripts\python.exe -m finance_tracker.bitable_sync --reconcile-all
+
+# 回读核对本地与飞书的 UID、核心字段和标签
+.\.venv\Scripts\python.exe -m finance_tracker.bitable_sync --audit-remote
 ```
 
 SQLite 是主数据源。飞书同步失败不会回滚本地账单，scheduler 会继续重试。

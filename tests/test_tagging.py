@@ -133,7 +133,7 @@ class TagGenerationTest(unittest.TestCase):
         ).split(",")
         self.assertEqual(tags, ["订阅"])
 
-    def test_no_evidence_leaves_tag_empty_instead_of_copying_category(self):
+    def test_no_specific_evidence_uses_clear_category_scene_fallback(self):
         tags = tagging.generate_tags(
             {
                 "date": "invalid",
@@ -143,7 +143,42 @@ class TagGenerationTest(unittest.TestCase):
                 "description": "",
             }
         )
-        self.assertEqual(tags, "")
+        self.assertEqual(tags, "兼职收入")
+
+    def test_common_historical_scenes_are_specific_and_not_missing(self):
+        cases = {
+            "洗澡": ("居住", "洗浴"),
+            "打麻将": ("娱乐", "棋牌"),
+            "下午去游泳": ("娱乐", "运动健身"),
+            "爸爸转账": ("其他", "家庭支持"),
+            "充值deepseek api": ("其他", "AI工具"),
+        }
+        for description, (category, expected) in cases.items():
+            txn_type = "收入" if description == "爸爸转账" else "支出"
+            tags = tagging.generate_tags(
+                {
+                    "date": "2026-07-18",
+                    "type": txn_type,
+                    "category": category,
+                    "amount": 10,
+                    "description": description,
+                },
+                preserve_existing=False,
+            ).split(",")
+            self.assertIn(expected, tags, description)
+
+    def test_substring_collisions_do_not_create_wrong_scene(self):
+        fruit = tagging.generate_tags(
+            {"type": "支出", "category": "餐饮", "description": "晚上买水果"},
+            preserve_existing=False,
+        ).split(",")
+        electric_bike = tagging.generate_tags(
+            {"type": "支出", "category": "交通", "description": "电动车充电桩"},
+            preserve_existing=False,
+        ).split(",")
+        self.assertIn("水果", fruit)
+        self.assertNotIn("饮品", fruit)
+        self.assertNotIn("铁路出行", electric_bike)
 
 
 class TagBackfillTest(unittest.TestCase):

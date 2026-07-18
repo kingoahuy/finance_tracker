@@ -63,6 +63,8 @@ Finance Tracker Pro is designed around a simpler workflow:
 | Feishu reports | Push daily reports to Feishu conversations |
 | Personal advance accounting | Track advances, reimbursements, and outstanding balance separately from ordinary finances |
 | Bitable sync | Sync transaction facts and daily metric snapshots for MTD/YTD, rolling averages, and budget pacing |
+| Complete scene tags | Keep tags compact and evidence-backed, with explicit category-scene fallbacks so active historical rows are never untagged |
+| Batch reconciliation | Batch-create/update transactions by UID, then read Feishu back and compare core fields and tags |
 | Dashboard-safe measures | Use additive income, expense, need/want, and fixed/variable fields without rebuilding filters |
 | Non-blocking incremental sync | Queue, claim, retry, and recover sync jobs without delaying user-facing bookkeeping replies |
 | Scheduler | Run automated reports, daily metric snapshots, sync tasks, and background services |
@@ -74,6 +76,7 @@ Finance Tracker Pro is designed around a simpler workflow:
 - Added MTD/YTD income, expense, net, daily/monthly averages, savings rates, budget pacing, and projected month-end spending.
 - Excluded personal advances from ordinary income, expense, budget, category, tag, and trend metrics while reporting them separately across Streamlit, email, Feishu, and DeepSeek reports.
 - Added sync-job claiming and stale-job recovery to reduce duplicate processing across background workers.
+- Added full UID-based Bitable reconciliation and read-back consistency checks for historical tag or field migrations.
 - Added configurable output-token limits for AI parsing and DeepSeek reports.
 
 ---
