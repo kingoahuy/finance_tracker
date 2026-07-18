@@ -216,6 +216,65 @@ class AiParserTest(unittest.TestCase):
         self.assertEqual(result["transactions"][0]["description"], "公司餐补")
         self.assertEqual(result["transactions"][0]["tags"], "餐补,公司福利")
 
+    def test_feishu_mixed_meal_allowance_and_reimbursement_is_expanded(self):
+        examples = (
+            (
+                "本周从周一到周五每天都收到公司的30餐补，在周五收到了公司个人垫付报销款583",
+                6,
+            ),
+            (
+                "本月7月13日-7月17日，这五天每天收到公司30元餐补，分笔记录",
+                5,
+            ),
+            (
+                "上周工作日7月13到17日每天收到公司餐补30元，7月17日收到了公司个人垫付报销款583",
+                6,
+            ),
+        )
+        config = {
+            "enabled": False,
+            "require_confirmation": True,
+            "fallback_to_local": True,
+            "api_key": "",
+            "base_url": "",
+            "model": "",
+            "timeout": 1,
+        }
+
+        for text, expected_count in examples:
+            with self.subTest(text=text):
+                result = ai_parser.parse_action(
+                    text,
+                    default_date="2026-07-18",
+                    config=config,
+                )
+                transactions = result["transactions"]
+                self.assertEqual(result["parser"], "local_recurrence")
+                self.assertTrue(result["need_confirmation"])
+                self.assertEqual(len(transactions), expected_count)
+
+                allowances = [row for row in transactions if row["amount"] == 30]
+                self.assertEqual(len(allowances), 5)
+                self.assertEqual(
+                    [row["date"] for row in allowances],
+                    [f"2026-07-{day:02d}" for day in range(13, 18)],
+                )
+                for allowance in allowances:
+                    self.assertEqual(allowance["type"], "收入")
+                    self.assertEqual(allowance["category"], "补贴")
+                    self.assertEqual(allowance["description"], "公司餐补")
+                    self.assertEqual(allowance["tags"], "餐补,公司福利")
+
+                reimbursements = [row for row in transactions if row["amount"] == 583]
+                self.assertEqual(len(reimbursements), expected_count - 5)
+                if reimbursements:
+                    reimbursement = reimbursements[0]
+                    self.assertEqual(reimbursement["date"], "2026-07-17")
+                    self.assertEqual(reimbursement["type"], "收入")
+                    self.assertEqual(reimbursement["category"], "报销")
+                    self.assertEqual(reimbursement["description"], "公司个人垫付报销款")
+                    self.assertEqual(reimbursement["tags"], "个人垫付")
+
     def test_ai_only_never_falls_back_to_local_parser(self):
         result = ai_parser.parse_action(
             "午饭25",

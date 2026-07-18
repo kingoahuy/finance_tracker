@@ -74,6 +74,8 @@ Finance Tracker Pro is designed around a simpler workflow:
 
 ### Latest Progress
 
+- Feishu natural-language bookkeeping now supports a weekday recurrence plus a separately dated one-off item in the same message, with category and tag evidence isolated per item.
+- Chinese date ranges accept common separators such as `到`, `至`, and `-`; parsed drafts still require confirmation, and retried Feishu events remain idempotent by event ID.
 - Added a two-layer Feishu Bitable model: transaction facts plus one daily metric snapshot per calendar day.
 - Added MTD/YTD income, expense, net, daily/monthly averages, savings rates, budget pacing, and projected month-end spending.
 - Excluded personal advances from ordinary income, expense, budget, category, tag, and trend metrics while reporting them separately across Streamlit, email, Feishu, and DeepSeek reports.
