@@ -10,7 +10,7 @@ class TagGenerationTest(unittest.TestCase):
         tags = set(tagging.generate_tags(transaction).split(","))
         for tag in expected:
             self.assertIn(tag, tags)
-        self.assertLessEqual(len(tags), 3)
+        self.assertEqual(len(tags), 3)
 
     def test_canteen_meal_has_meaningful_tags(self):
         tags = set(
@@ -40,7 +40,7 @@ class TagGenerationTest(unittest.TestCase):
                 }
             ).split(",")
         )
-        self.assertEqual(tags, {"地铁"})
+        self.assertEqual(tags, {"地铁", "日常出行", "刚需"})
 
     def test_coffee_has_coffee_tag(self):
         self.assertTagsContain(
@@ -119,7 +119,7 @@ class TagGenerationTest(unittest.TestCase):
         ).split(",")
         self.assertEqual(tags[0], "AI自定义")
         self.assertIn("咖啡", tags)
-        self.assertEqual(len(tags), 2)
+        self.assertEqual(len(tags), 3)
 
     def test_membership_name_is_not_misread_as_fruit(self):
         tags = tagging.generate_tags(
@@ -131,7 +131,7 @@ class TagGenerationTest(unittest.TestCase):
                 "description": "苹果音乐会员",
             }
         ).split(",")
-        self.assertEqual(tags, ["订阅"])
+        self.assertEqual(tags, ["订阅", "休闲娱乐", "非刚需"])
 
     def test_no_specific_evidence_uses_clear_category_scene_fallback(self):
         tags = tagging.generate_tags(
@@ -143,7 +143,22 @@ class TagGenerationTest(unittest.TestCase):
                 "description": "",
             }
         )
-        self.assertEqual(tags, "兼职收入")
+        self.assertEqual(tags, "兼职,兼职收入,收入记录")
+
+    def test_meal_subsidy_expense_gets_explicit_usage_tag(self):
+        tags = tagging.generate_tags(
+            {
+                "date": "2026-07-18",
+                "type": "支出",
+                "category": "餐饮",
+                "amount": 20,
+                "description": "用餐补买午饭",
+                "is_need": True,
+            },
+            preserve_existing=False,
+        ).split(",")
+        self.assertEqual(len(tags), 3)
+        self.assertIn("餐补消费", tags)
 
     def test_common_historical_scenes_are_specific_and_not_missing(self):
         cases = {
@@ -232,6 +247,7 @@ class TagBackfillTest(unittest.TestCase):
         result = tagging.backfill_tags(apply=True)
         tags, sync_status, tags_text = self._row()
         self.assertEqual(result["updated_count"], 1)
+        self.assertEqual(len(tags.split(",")), 3)
         self.assertIn("地铁", tags.split(","))
         self.assertIn("地铁", tags_text.split(", "))
         self.assertEqual(sync_status, "pending")

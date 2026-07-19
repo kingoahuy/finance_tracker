@@ -5,13 +5,15 @@ from collections import defaultdict, deque
 try:
     from .advance_payment import has_personal_advance_tag
     from .ledger import MONTHLY_BUDGET, connect, init_db
+    from .meal_subsidy import is_meal_subsidy_expense
 except ImportError:
     from advance_payment import has_personal_advance_tag
     from ledger import MONTHLY_BUDGET, connect, init_db
+    from meal_subsidy import is_meal_subsidy_expense
 
 
 DAILY_DASHBOARD_TABLE_NAME = "看板日指标"
-DAILY_DASHBOARD_VERSION = "daily-dashboard-v1"
+DAILY_DASHBOARD_VERSION = "daily-dashboard-v2"
 WEEKDAYS_CN = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 
 # 飞书字段类型：1 文本、2 数字、5 日期、7 复选框。
@@ -37,12 +39,15 @@ DAILY_DASHBOARD_FIELD_SPECS = (
     {"key": "daily_expense", "label": "当日支出", "bitable_type": 2},
     {"key": "daily_net", "label": "当日净额", "bitable_type": 2},
     {"key": "daily_transaction_count", "label": "当日交易笔数", "bitable_type": 2},
+    {"key": "daily_meal_subsidy_expense", "label": "当日餐补消费", "bitable_type": 2},
     {"key": "mtd_income", "label": "MTD收入", "bitable_type": 2},
     {"key": "mtd_expense", "label": "MTD支出", "bitable_type": 2},
     {"key": "mtd_net", "label": "MTD净额", "bitable_type": 2},
     {"key": "mtd_daily_avg_income", "label": "MTD日均收入", "bitable_type": 2},
     {"key": "mtd_daily_avg_expense", "label": "MTD日均支出", "bitable_type": 2},
     {"key": "mtd_savings_rate", "label": "MTD储蓄率", "bitable_type": 2},
+    {"key": "mtd_meal_subsidy_expense", "label": "MTD餐补消费", "bitable_type": 2},
+    {"key": "mtd_meal_subsidy_expense_share", "label": "MTD餐补消费占比", "bitable_type": 2},
     {"key": "ytd_income", "label": "YTD收入", "bitable_type": 2},
     {"key": "ytd_expense", "label": "YTD支出", "bitable_type": 2},
     {"key": "ytd_net", "label": "YTD净额", "bitable_type": 2},
@@ -51,6 +56,8 @@ DAILY_DASHBOARD_FIELD_SPECS = (
     {"key": "ytd_monthly_avg_income", "label": "YTD月均收入", "bitable_type": 2},
     {"key": "ytd_monthly_avg_expense", "label": "YTD月均支出", "bitable_type": 2},
     {"key": "ytd_savings_rate", "label": "YTD储蓄率", "bitable_type": 2},
+    {"key": "ytd_meal_subsidy_expense", "label": "YTD餐补消费", "bitable_type": 2},
+    {"key": "ytd_meal_subsidy_expense_share", "label": "YTD餐补消费占比", "bitable_type": 2},
     {"key": "rolling_7d_avg_expense", "label": "近7日日均支出", "bitable_type": 2},
     {"key": "rolling_30d_avg_expense", "label": "近30日日均支出", "bitable_type": 2},
     {"key": "monthly_budget", "label": "月预算", "bitable_type": 2},
@@ -96,13 +103,15 @@ def build_daily_dashboard_rows(as_of_date=None):
             bucket["income"] += amount
         elif item["type"] == "支出":
             bucket["expense"] += amount
+            if is_meal_subsidy_expense(item):
+                bucket["meal_subsidy_expense"] += amount
         bucket["transaction_count"] += 1
 
     rows = []
     current_month = None
     current_year = None
-    month_income = month_expense = 0.0
-    year_income = year_expense = 0.0
+    month_income = month_expense = month_meal_subsidy_expense = 0.0
+    year_income = year_expense = year_meal_subsidy_expense = 0.0
     advance_balance = 0.0
     rolling_7d = deque(maxlen=7)
     rolling_30d = deque(maxlen=30)
@@ -112,16 +121,18 @@ def build_daily_dashboard_rows(as_of_date=None):
         month_key = (metric_date.year, metric_date.month)
         if month_key != current_month:
             current_month = month_key
-            month_income = month_expense = 0.0
+            month_income = month_expense = month_meal_subsidy_expense = 0.0
         if metric_date.year != current_year:
             current_year = metric_date.year
-            year_income = year_expense = 0.0
+            year_income = year_expense = year_meal_subsidy_expense = 0.0
 
         amounts = daily[metric_date]
         month_income += amounts["income"]
         month_expense += amounts["expense"]
         year_income += amounts["income"]
         year_expense += amounts["expense"]
+        month_meal_subsidy_expense += amounts["meal_subsidy_expense"]
+        year_meal_subsidy_expense += amounts["meal_subsidy_expense"]
         advance_balance += (
             amounts["advance_expense"] - amounts["advance_reimbursement"]
         )
@@ -169,12 +180,22 @@ def build_daily_dashboard_rows(as_of_date=None):
                 "daily_expense": _money(amounts["expense"]),
                 "daily_net": _money(amounts["income"] - amounts["expense"]),
                 "daily_transaction_count": int(amounts["transaction_count"]),
+                "daily_meal_subsidy_expense": _money(
+                    amounts["meal_subsidy_expense"]
+                ),
                 "mtd_income": _money(month_income),
                 "mtd_expense": _money(month_expense),
                 "mtd_net": _money(month_net),
                 "mtd_daily_avg_income": _money(month_income / metric_date.day),
                 "mtd_daily_avg_expense": _money(month_expense / metric_date.day),
                 "mtd_savings_rate": _percent(month_net, month_income),
+                "mtd_meal_subsidy_expense": _money(
+                    month_meal_subsidy_expense
+                ),
+                "mtd_meal_subsidy_expense_share": _percent(
+                    month_meal_subsidy_expense,
+                    month_expense,
+                ),
                 "ytd_income": _money(year_income),
                 "ytd_expense": _money(year_expense),
                 "ytd_net": _money(year_net),
@@ -191,6 +212,13 @@ def build_daily_dashboard_rows(as_of_date=None):
                     year_expense / metric_date.month
                 ),
                 "ytd_savings_rate": _percent(year_net, year_income),
+                "ytd_meal_subsidy_expense": _money(
+                    year_meal_subsidy_expense
+                ),
+                "ytd_meal_subsidy_expense_share": _percent(
+                    year_meal_subsidy_expense,
+                    year_expense,
+                ),
                 "rolling_7d_avg_expense": _money(
                     sum(rolling_7d) / len(rolling_7d)
                 ),
@@ -249,7 +277,7 @@ def _load_active_transactions(as_of):
     with connect() as conn:
         rows = conn.execute(
             """
-            SELECT date, type, amount, tags
+            SELECT date, type, amount, description, tags
             FROM transactions
             WHERE COALESCE(status, 'active') = 'active'
               AND date IS NOT NULL
@@ -259,7 +287,7 @@ def _load_active_transactions(as_of):
             (as_of.isoformat(),),
         ).fetchall()
     result = []
-    for date_value, txn_type, amount, tags in rows:
+    for date_value, txn_type, amount, description, tags in rows:
         try:
             txn_date = _as_date(str(date_value)[:10])
         except ValueError:
@@ -269,6 +297,7 @@ def _load_active_transactions(as_of):
                 "date": txn_date,
                 "type": str(txn_type or ""),
                 "amount": float(amount or 0),
+                "description": str(description or ""),
                 "tags": tags,
             }
         )
@@ -280,6 +309,7 @@ def _empty_daily_amounts():
         "income": 0.0,
         "expense": 0.0,
         "transaction_count": 0,
+        "meal_subsidy_expense": 0.0,
         "advance_expense": 0.0,
         "advance_reimbursement": 0.0,
     }

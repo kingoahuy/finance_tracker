@@ -68,12 +68,15 @@ Finance Tracker Pro is designed around a simpler workflow:
 | DeepSeek web bookkeeping | Use the same Flash-to-Pro parsing policy as Feishu and write only after draft confirmation |
 | Scheduled invalid-row cleanup | Conservatively remove test/structurally invalid rows and synced soft deletes after retention |
 | Dashboard-safe measures | Use additive income, expense, need/want, and fixed/variable fields without rebuilding filters |
+| Meal-subsidy usage | Identify explicitly evidenced meal-subsidy spending and expose additive amounts plus MTD/YTD shares |
 | Non-blocking incremental sync | Queue, claim, retry, and recover sync jobs without delaying user-facing bookkeeping replies |
 | Scheduler | Run automated reports, daily metric snapshots, sync tasks, and background services |
 | Privacy protection | Keep `.env`, database files, logs, exports, and backups out of Git |
 
 ### Latest Progress
 
+- Rebuilt active history to exactly three evidence-backed tags per transaction, using deterministic transaction facts instead of guessing missing scenes.
+- Added meal-subsidy usage flags, additive spend, and MTD/YTD meal-subsidy spend shares; subsidy income and ordinary meals are excluded.
 - Feishu natural-language bookkeeping now supports a weekday recurrence plus a separately dated one-off item in the same message, with category and tag evidence isolated per item.
 - Chinese date ranges accept common separators such as `到`, `至`, and `-`; parsed drafts still require confirmation, and retried Feishu events remain idempotent by event ID.
 - Added a two-layer Feishu Bitable model: transaction facts plus one daily metric snapshot per calendar day.

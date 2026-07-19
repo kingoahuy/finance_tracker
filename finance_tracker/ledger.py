@@ -791,7 +791,8 @@ def backfill_derived_fields(apply=False, example_limit=10):
     with connect() as conn:
         rows = conn.execute(
             f"""
-            SELECT rowid, id, transaction_uid, date, type, amount, tags, status,
+            SELECT rowid, id, transaction_uid, date, type, category, amount,
+                   description, tags, is_need, is_fixed, status,
                    {DERIVED_COLUMN_SQL}
             FROM transactions
             ORDER BY rowid ASC
@@ -802,12 +803,16 @@ def backfill_derived_fields(apply=False, example_limit=10):
             base = {
                 "date": row[3],
                 "type": row[4],
-                "amount": row[5],
-                "tags": row[6],
-                "status": row[7] or "active",
+                "category": row[5],
+                "amount": row[6],
+                "description": row[7],
+                "tags": row[8],
+                "is_need": row[9],
+                "is_fixed": row[10],
+                "status": row[11] or "active",
             }
             desired = derived_values(base)
-            current = tuple(row[8:8 + len(DERIVED_COLUMNS)])
+            current = tuple(row[12:12 + len(DERIVED_COLUMNS)])
             if _derived_tuple_equal(current, desired):
                 continue
             planned.append(
@@ -818,8 +823,8 @@ def backfill_derived_fields(apply=False, example_limit=10):
                     "transaction_uid_prefix": str(row[2] or "")[:8],
                     "date": str(row[3] or ""),
                     "type": str(row[4] or ""),
-                    "amount": float(row[5] or 0),
-                    "status": str(row[7] or "active"),
+                    "amount": float(row[6] or 0),
+                    "status": str(row[11] or "active"),
                     "derived": dict(zip(DERIVED_COLUMNS, desired)),
                 }
             )

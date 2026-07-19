@@ -1106,6 +1106,8 @@ category 只能是：{categories}
 21. conversation_context.repair_required=true 时，上一轮 Pro 草稿未通过 retry_reason 指定的结构校验；
     必须针对该原因修复并返回完整 JSON。previous_attempt 只提供上一轮意图、置信度和笔数，
     不代表正确结果；最终 transactions 必须同时满足原文、候选和日期约束。
+22. 如果原文明确说使用餐补、餐卡、饭卡或餐券支付，description 必须保留该支付来源；
+    不要把“用餐补买午饭”简化成“午饭”。餐补到账仍是补贴收入，不是餐补消费。
 """.strip()
 
 
@@ -1152,6 +1154,8 @@ intent 只能是 create_transactions 或 ask_clarification。
 10. 信息充分时 confidence 应不低于0.85；不要因为口语简短而返回 unknown 或 chat。
 11. conversation_context.repair_required=true 时，上一轮草稿未通过 retry_reason 指定的校验；
     必须补全遗漏、修正日期或笔数后重新返回完整 JSON，不要重复原错误。
+12. 如果原文明确说使用餐补、餐卡、饭卡或餐券支付，description 必须保留该支付来源；
+    餐补到账属于补贴收入，不能标成餐补消费。
 """.strip()
 
 

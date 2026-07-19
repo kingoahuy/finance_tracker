@@ -214,7 +214,10 @@ class AiParserTest(unittest.TestCase):
         self.assertEqual(result["transactions"][0]["type"], "收入")
         self.assertEqual(result["transactions"][0]["category"], "补贴")
         self.assertEqual(result["transactions"][0]["description"], "公司餐补")
-        self.assertEqual(result["transactions"][0]["tags"], "餐补,公司福利")
+        self.assertEqual(
+            result["transactions"][0]["tags"],
+            "餐补,公司福利,补贴收入",
+        )
 
     def test_feishu_mixed_meal_allowance_and_reimbursement_is_expanded(self):
         examples = (
@@ -263,7 +266,10 @@ class AiParserTest(unittest.TestCase):
                     self.assertEqual(allowance["type"], "收入")
                     self.assertEqual(allowance["category"], "补贴")
                     self.assertEqual(allowance["description"], "公司餐补")
-                    self.assertEqual(allowance["tags"], "餐补,公司福利")
+                    self.assertEqual(
+                        allowance["tags"],
+                        "餐补,公司福利,补贴收入",
+                    )
 
                 reimbursements = [row for row in transactions if row["amount"] == 583]
                 self.assertEqual(len(reimbursements), expected_count - 5)
@@ -273,7 +279,10 @@ class AiParserTest(unittest.TestCase):
                     self.assertEqual(reimbursement["type"], "收入")
                     self.assertEqual(reimbursement["category"], "报销")
                     self.assertEqual(reimbursement["description"], "公司个人垫付报销款")
-                    self.assertEqual(reimbursement["tags"], "个人垫付")
+                    self.assertEqual(
+                        reimbursement["tags"],
+                        "个人垫付,报销,报销收入",
+                    )
 
     def test_ai_only_never_falls_back_to_local_parser(self):
         result = ai_parser.parse_action(

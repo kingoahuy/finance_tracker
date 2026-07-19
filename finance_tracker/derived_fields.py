@@ -2,8 +2,13 @@ import datetime
 import re
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
+try:
+    from .meal_subsidy import is_meal_subsidy_expense
+except ImportError:
+    from meal_subsidy import is_meal_subsidy_expense
 
-DATA_VERSION = "derived-v2"
+
+DATA_VERSION = "derived-v3"
 WEEKDAYS_CN = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 
 DERIVED_FIELD_SPECS = (
@@ -23,6 +28,8 @@ DERIVED_FIELD_SPECS = (
     {"key": "is_expense", "label": "是否支出", "sqlite": "INTEGER DEFAULT 0", "bitable_type": 7},
     {"key": "is_active", "label": "是否有效", "sqlite": "INTEGER DEFAULT 1", "bitable_type": 7},
     {"key": "is_personal_advance", "label": "是否个人垫付", "sqlite": "INTEGER DEFAULT 0", "bitable_type": 7},
+    {"key": "is_meal_subsidy_used", "label": "是否使用餐补", "sqlite": "INTEGER DEFAULT 0", "bitable_type": 7},
+    {"key": "meal_subsidy_expense_amount", "label": "餐补消费金额", "sqlite": "REAL", "bitable_type": 2},
     {"key": "dashboard_income_amount", "label": "看板收入", "sqlite": "REAL", "bitable_type": 2},
     {"key": "dashboard_expense_amount", "label": "看板支出", "sqlite": "REAL", "bitable_type": 2},
     {"key": "dashboard_net_amount", "label": "看板净额", "sqlite": "REAL", "bitable_type": 2},
@@ -89,6 +96,7 @@ def enrich_transaction_fields(transaction):
     is_expense = txn_type == "支出"
     is_active = status == "active"
     is_personal_advance = "个人垫付" in tags
+    is_meal_subsidy_used = is_meal_subsidy_expense(result)
     dashboard_eligible = is_active and not is_personal_advance
     dashboard_income = amount if dashboard_eligible and is_income else 0.0
     dashboard_expense = amount if dashboard_eligible and is_expense else 0.0
@@ -106,6 +114,10 @@ def enrich_transaction_fields(transaction):
             "is_expense": 1 if is_expense else 0,
             "is_active": 1 if is_active else 0,
             "is_personal_advance": 1 if is_personal_advance else 0,
+            "is_meal_subsidy_used": 1 if is_meal_subsidy_used else 0,
+            "meal_subsidy_expense_amount": (
+                dashboard_expense if is_meal_subsidy_used else 0.0
+            ),
             "dashboard_income_amount": dashboard_income,
             "dashboard_expense_amount": dashboard_expense,
             "dashboard_net_amount": dashboard_net,

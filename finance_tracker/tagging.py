@@ -8,16 +8,23 @@ try:
         PERSONAL_ADVANCE_TAG,
         text_mentions_personal_advance,
     )
+    from .meal_subsidy import (
+        MEAL_SUBSIDY_USAGE_TAG,
+        is_meal_subsidy_expense,
+    )
 except ImportError:
     from advance_payment import (
         PERSONAL_ADVANCE_TAG,
         text_mentions_personal_advance,
     )
+    from meal_subsidy import (
+        MEAL_SUBSIDY_USAGE_TAG,
+        is_meal_subsidy_expense,
+    )
 
 
-# Categories, need/fixed flags, amount buckets and weekdays already have dedicated
-# columns in SQLite/Feishu.  Tags are deliberately reserved for concrete scenes,
-# sources and explicit projects so dashboards do not count the same dimension twice.
+# Every record receives three evidence-backed tags. Specific scenes and sources
+# come first; stable category/need/fixed facts fill any remaining slots.
 MAX_TAGS = 3
 TRUSTED_EXISTING_TAGS = {PERSONAL_ADVANCE_TAG, "2026海南旅游"}
 
@@ -114,12 +121,14 @@ INCOME_SCENE_RULES = (
     ("住房补贴", ("住房补贴", "租房补贴")),
     ("工资", ("工资", "薪资", "薪水")),
     ("奖金", ("奖金", "年终奖", "绩效奖")),
+    ("奖学金", ("奖学金",)),
     ("报销", ("报销",)),
     ("退款", ("退款", "退回")),
     ("理财收益", ("理财", "利息", "收益")),
     ("生日红包", ("生日红包",)),
     ("红包", ("红包",)),
     ("兼职", ("兼职", "稿费", "劳务费")),
+    ("二手转卖", ("二手", "卖废品", "出售闲置", "卖出闲置")),
     ("退税", ("退税",)),
     ("助学金", ("助学金",)),
     ("家庭支持", ("爸爸转账", "妈妈转账", "爸爸转", "妈妈转", "生活费")),
@@ -199,11 +208,21 @@ def generate_tags(
     generated = []
     if text_mentions_personal_advance(description, raw_text):
         generated.append(PERSONAL_ADVANCE_TAG)
+    if is_meal_subsidy_expense(
+        {
+            "type": txn_type,
+            "description": description,
+            "tags": raw_text,
+        }
+    ):
+        generated.append(MEAL_SUBSIDY_USAGE_TAG)
 
     if txn_type == "收入":
         income_scene = _first_match(text, INCOME_SCENE_RULES)
         if income_scene:
             generated.append(income_scene)
+        else:
+            generated.append(category)
         if category == "补贴" and _contains_any(text, ("公司", "单位", "雇主")):
             generated.append("公司福利")
     else:
@@ -228,14 +247,18 @@ def generate_tags(
         if category == "交通" and _contains_any(text, ("上班", "下班", "通勤")):
             generated.append("通勤")
 
-    generated = [tag for tag in generated if tag != category]
-    if not retained and not generated:
-        generated.append(
-            CATEGORY_DEFAULT_TAGS.get(
-                (txn_type, category),
-                "其他收入" if txn_type == "收入" else "其他支出",
-            )
-        )
+    category_context = CATEGORY_DEFAULT_TAGS.get(
+        (txn_type, category),
+        "其他收入" if txn_type == "收入" else "其他支出",
+    )
+    generated.append(category_context)
+    if txn_type == "支出":
+        generated.append("刚需" if bool(transaction.get("is_need")) else "非刚需")
+        generated.append("固定支出" if bool(transaction.get("is_fixed")) else "变动支出")
+    else:
+        generated.append(category)
+        generated.append("收入记录")
+        generated.append("场景待细分")
     tags = merge_tags(retained, generated)
     return ",".join(tags[:MAX_TAGS])
 

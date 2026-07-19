@@ -33,7 +33,7 @@ class DashboardMetricsTest(unittest.TestCase):
                 "type": "支出",
                 "category": "餐饮",
                 "amount": 30,
-                "description": "早餐",
+                "description": "用餐补买早餐",
             }
         )
         ledger.add_transaction(
@@ -64,6 +64,10 @@ class DashboardMetricsTest(unittest.TestCase):
         self.assertEqual(rows[-1]["mtd_expense"], 60.0)
         self.assertEqual(rows[-1]["mtd_daily_avg_income"], 33.33)
         self.assertEqual(rows[-1]["mtd_daily_avg_expense"], 20.0)
+        self.assertEqual(rows[-1]["mtd_meal_subsidy_expense"], 30.0)
+        self.assertEqual(rows[-1]["mtd_meal_subsidy_expense_share"], 50.0)
+        self.assertEqual(rows[-1]["ytd_meal_subsidy_expense"], 30.0)
+        self.assertEqual(rows[-1]["ytd_meal_subsidy_expense_share"], 50.0)
         self.assertEqual(rows[-1]["advance_balance"], 20.0)
         self.assertTrue(rows[-1]["is_latest"])
 

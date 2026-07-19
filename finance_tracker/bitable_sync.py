@@ -100,6 +100,8 @@ FIELD_MAP = {
 REQUIRED_FIELDS = tuple(FIELD_MAP.values())
 DASHBOARD_TRANSACTION_KEYS = (
     "is_personal_advance",
+    "is_meal_subsidy_used",
+    "meal_subsidy_expense_amount",
     "dashboard_income_amount",
     "dashboard_expense_amount",
     "dashboard_net_amount",
@@ -192,6 +194,12 @@ def transaction_to_bitable_fields(transaction):
         FIELD_MAP["is_active"]: bool(transaction.get("is_active")),
         FIELD_MAP["is_personal_advance"]: bool(
             transaction.get("is_personal_advance")
+        ),
+        FIELD_MAP["is_meal_subsidy_used"]: bool(
+            transaction.get("is_meal_subsidy_used")
+        ),
+        FIELD_MAP["meal_subsidy_expense_amount"]: float(
+            transaction.get("meal_subsidy_expense_amount") or 0
         ),
         FIELD_MAP["dashboard_income_amount"]: float(
             transaction.get("dashboard_income_amount") or 0
@@ -2378,7 +2386,7 @@ def sync_dashboard_transaction_fields(service=None):
         fields = {}
         for key in DASHBOARD_TRANSACTION_KEYS:
             value = local.get(key)
-            if key == "is_personal_advance":
+            if key in {"is_personal_advance", "is_meal_subsidy_used"}:
                 value = bool(value)
             elif key != "data_version":
                 value = float(value or 0)
