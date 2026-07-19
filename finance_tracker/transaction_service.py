@@ -5,6 +5,7 @@ import threading
 import pandas as pd
 
 try:
+    from .advance_payment import actual_transactions_df, personal_advance_summary
     from .derived_fields import DERIVED_COLUMNS, derived_values
     from .email_service import generate_report_content
     from .ledger import (
@@ -25,6 +26,7 @@ try:
         update_pending_action_payload,
     )
 except ImportError:
+    from advance_payment import actual_transactions_df, personal_advance_summary
     from derived_fields import DERIVED_COLUMNS, derived_values
     from email_service import generate_report_content
     from ledger import (
@@ -127,6 +129,9 @@ def get_today_summary(target_date=None):
     target_date = _as_date(target_date or datetime.date.today())
     df = _normalized_transactions()
     day_df = df[df["date"].dt.date == target_date] if not df.empty else df
+    balance_df = df[df["date"].dt.date <= target_date] if not df.empty else df
+    advance = personal_advance_summary(day_df, balance_df=balance_df)
+    day_df = actual_transactions_df(day_df)
     expense = _sum_type(day_df, "支出")
     daily_budget = MONTHLY_BUDGET / max(
         1,
@@ -139,6 +144,7 @@ def get_today_summary(target_date=None):
         "balance": _sum_type(day_df, "收入") - expense,
         "count": int(len(day_df)),
         "transactions": _records(day_df),
+        "personal_advance": advance,
         "daily_budget_reference": daily_budget,
         "is_over_daily_budget": expense > daily_budget,
     }
@@ -155,6 +161,9 @@ def get_month_summary(target_date=None):
             & (df["date"].dt.month == target_date.month)
             & (df["date"].dt.date <= target_date)
         ]
+    balance_df = df[df["date"].dt.date <= target_date] if not df.empty else df
+    advance = personal_advance_summary(month_df, balance_df=balance_df)
+    month_df = actual_transactions_df(month_df)
     income = _sum_type(month_df, "收入")
     expense = _sum_type(month_df, "支出")
     expense_df = month_df[month_df["type"] == "支出"] if not month_df.empty else month_df
@@ -180,6 +189,7 @@ def get_month_summary(target_date=None):
         "budget_usage": (expense / MONTHLY_BUDGET * 100) if MONTHLY_BUDGET else 0.0,
         "count": int(len(month_df)),
         "top_categories": top_categories,
+        "personal_advance": advance,
     }
 
 
@@ -208,6 +218,7 @@ def get_category_summary(category, target_date=None):
             & (df["date"].dt.month == target_date.month)
             & (df["date"].dt.date <= target_date)
         ]
+        month_df = actual_transactions_df(month_df)
         expense_df = month_df[month_df["type"] == "支出"]
         category_df = expense_df[expense_df["category"] == category]
     amount = float(category_df["amount"].sum()) if not category_df.empty else 0.0
@@ -598,23 +609,24 @@ def _enqueue_update(conn, transaction_uid):
 
 def _try_sync(transaction_uid):
     try:
-        from .bitable_sync import auto_sync_enabled, sync_transaction
+        from .bitable_sync import auto_sync_enabled
     except ImportError:
         try:
-            from bitable_sync import auto_sync_enabled, sync_transaction
+            from bitable_sync import auto_sync_enabled
         except ImportError:
-            return
-    if not auto_sync_enabled():
-        return
-    if transaction_uid:
-        try:
-            sync_transaction(transaction_uid)
-        except Exception:
-            pass
+            return False
+    if not transaction_uid:
+        return False
+    try:
+        if not auto_sync_enabled():
+            return False
+        return schedule_pending_sync()
+    except Exception:
+        return False
 
 
 def schedule_pending_sync():
-    """Sync editor-created outbox work without blocking the Streamlit page."""
+    """Sync queued outbox work without blocking user-facing requests."""
     global _PENDING_SYNC_THREAD
     with _PENDING_SYNC_LOCK:
         if _PENDING_SYNC_THREAD and _PENDING_SYNC_THREAD.is_alive():

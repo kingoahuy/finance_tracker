@@ -15,6 +15,7 @@ if str(MODULE_DIR) not in sys.path:
 
 from config import save_env_values
 from derived_fields import DERIVED_FIELD_LABELS, DERIVED_FIELD_SPECS
+from advance_payment import actual_transactions_df, personal_advance_balance
 from bitable_sync import (
     check_bitable,
     full_sync,
@@ -29,6 +30,7 @@ from email_service import generate_report_content, get_mail_config_status
 from feishu_config import get_feishu_config_status
 from ledger import (
     CATEGORIES,
+    DB_FILE,
     MONTHLY_BUDGET,
     add_email_job,
     delete_job,
@@ -38,8 +40,12 @@ from ledger import (
     load_transactions,
     update_transactions_from_editor,
 )
-from transaction_service import create_transactions_from_text
 from transaction_service import schedule_pending_sync
+from streamlit_bookkeeping import (
+    commit_web_bookkeeping,
+    parse_web_bookkeeping,
+    preview_web_action,
+)
 
 # ================= 1. 核心配置 =================
 st.set_page_config(page_title="智账 Pro", layout="centered", page_icon="💸")
@@ -78,6 +84,20 @@ st.markdown("""
 # ================= 2. 本地账本操作 =================
 def load_data():
     return load_transactions()
+
+
+def data_editor_key_for(df):
+    if df.empty:
+        return "data_editor_empty"
+    parts = [str(len(df))]
+    if "_rowid" in df.columns:
+        rowids = pd.to_numeric(df["_rowid"], errors="coerce")
+        parts.append(str(int(rowids.max())) if not rowids.empty and pd.notna(rowids.max()) else "0")
+    for column in ("updated_at", "created_at", "sync_status"):
+        if column in df.columns:
+            values = df[column].fillna("").astype(str)
+            parts.append(values.max() if not values.empty else "")
+    return "data_editor_" + "_".join(parts)
 
 
 # ================= 3. UI 组件 =================
@@ -164,7 +184,7 @@ def main():
     # --- 1. 记账 ---
     if selected == "记账":
         st.markdown("<h2 style='text-align:center;'>今天记账了？</h2>", unsafe_allow_html=True)
-        st.caption("💡 本地识别，不调用外部 AI。多条记录请换行输入，例如：买咖啡20")
+        st.caption("💡 使用 DeepSeek 智能解析，与飞书记账一致；生成草稿后需要确认才会写入。")
 
         with st.container():
             st.markdown('<div class="big-input">', unsafe_allow_html=True)
@@ -172,25 +192,43 @@ def main():
             st.markdown('</div>', unsafe_allow_html=True)
 
             if st.button("发送 🚀", type="primary", width="stretch") and user_input:
-                with st.spinner("正在解析并写入本地账本..."):
-                    items = create_transactions_from_text(user_input, source="streamlit")
-                    if items:
-                        for item in items:
-                            is_income = item.get('type') == '收入'
-                            color = "green" if is_income else "red"
-                            symbol = "+" if is_income else "-"
+                with st.spinner("正在调用 DeepSeek 解析记账信息..."):
+                    parsed = parse_web_bookkeeping(user_input)
+                if parsed.get("success"):
+                    st.session_state["web_pending_bookkeeping"] = parsed["action"]
+                elif parsed.get("needs_clarification"):
+                    st.warning(parsed["message"])
+                else:
+                    st.error(parsed["message"])
 
-                            with st.chat_message("assistant", avatar="🧾"):
-                                st.markdown(f"""
-                                <div style="font-size: 20px; font-weight: bold; color: {color};">
-                                    {symbol} {item.get('amount', 0)} <span style="font-size:14px;color:#666">({item.get('category')})</span>
-                                </div>
-                                <div style="color:#888;font-size:14px">📝 {item.get('description')}</div>
-                                """, unsafe_allow_html=True)
-                                if item.get("local_comment"): st.info(f"💡 {item['local_comment']}")
-                        st.session_state['refresh'] = True
-                    else:
-                        st.error("没听懂...请明确金额和事项")
+            pending_web_action = st.session_state.get("web_pending_bookkeeping")
+            if pending_web_action:
+                tier = pending_web_action.get("model_tier", "flash")
+                st.info(
+                    f"DeepSeek {'Pro' if str(tier).startswith('pro') else 'Flash'} 已生成草稿，"
+                    "请检查日期、收支、金额、分类和标签。"
+                )
+                st.dataframe(
+                    pd.DataFrame(preview_web_action(pending_web_action)),
+                    hide_index=True,
+                    width="stretch",
+                )
+                confirm_col, cancel_col = st.columns(2)
+                with confirm_col:
+                    if st.button("✅ 确认记账", type="primary", width="stretch"):
+                        action_to_commit = st.session_state.pop("web_pending_bookkeeping")
+                        try:
+                            with st.spinner("正在写入账本并排队同步飞书..."):
+                                items = commit_web_bookkeeping(action_to_commit)
+                            st.success(f"已记账 {len(items)} 笔，并已进入飞书同步队列。")
+                            st.session_state["refresh"] = True
+                        except Exception as exc:
+                            st.session_state["web_pending_bookkeeping"] = action_to_commit
+                            st.error(f"记账失败：{type(exc).__name__}，请稍后重试。")
+                with cancel_col:
+                    if st.button("取消", width="stretch"):
+                        st.session_state.pop("web_pending_bookkeeping", None)
+                        st.info("已取消，本次内容未写入账本。")
 
     # --- 2. 看板 ---
     elif selected == "看板":
@@ -211,12 +249,14 @@ def main():
 
             this_month_mask = (df['date'].dt.year == sel_year) & (df['date'].dt.month == sel_month)
             this_month = df[this_month_mask]
+            actual_this_month = actual_transactions_df(this_month)
+            advance_metrics = personal_advance_balance(df)
 
-            inc = this_month[this_month['type'] == '收入']['amount'].sum()
-            exp = this_month[this_month['type'] == '支出']['amount'].sum()
+            inc = actual_this_month[actual_this_month['type'] == '收入']['amount'].sum()
+            exp = actual_this_month[actual_this_month['type'] == '支出']['amount'].sum()
             bal = inc - exp
 
-            c1, c2, c3 = st.columns(3)
+            c1, c2, c3, c4 = st.columns(4)
             c1.markdown(
                 f"""<div class="css-card"><div style="color:#888;font-size:12px">{sel_month}月收入</div><div class="text-inc" style="font-size:20px">+{inc:,.0f}</div></div>""",
                 unsafe_allow_html=True)
@@ -226,6 +266,9 @@ def main():
             bal_col = "text-bal" if bal >= 0 else "text-exp"
             c3.markdown(
                 f"""<div class="css-card"><div style="color:#888;font-size:12px">{sel_month}月结余</div><div class="{bal_col}" style="font-size:20px">{bal:+,.0f}</div></div>""",
+                unsafe_allow_html=True)
+            c4.markdown(
+                f"""<div class="css-card"><div style="color:#888;font-size:12px">个人垫付余额</div><div class="text-bal" style="font-size:20px">¥{advance_metrics['advance_balance']:,.0f}</div></div>""",
                 unsafe_allow_html=True)
 
             # 🔥🔥🔥 新增：收支趋势折线图 (带年份、月份筛选器) 🔥🔥🔥
@@ -247,13 +290,15 @@ def main():
             trend_df = pd.DataFrame()
             if trend_month == "全年":
                 # 筛选某年，展示当年的月度情况
-                trend_df = df[df['date'].dt.year == trend_year].copy()
+                trend_df = actual_transactions_df(df[df['date'].dt.year == trend_year]).copy()
                 if not trend_df.empty:
                     trend_df['sort_key'] = trend_df['date'].dt.month
                     trend_df['period'] = trend_df['sort_key'].astype(str) + "月"
             else:
                 # 筛选某年某月，展示当月每日的情况
-                trend_df = df[(df['date'].dt.year == trend_year) & (df['date'].dt.month == trend_month)].copy()
+                trend_df = actual_transactions_df(
+                    df[(df['date'].dt.year == trend_year) & (df['date'].dt.month == trend_month)]
+                ).copy()
                 if not trend_df.empty:
                     trend_df['sort_key'] = trend_df['date'].dt.day
                     trend_df['period'] = trend_df['sort_key'].astype(str) + "日"
@@ -286,8 +331,8 @@ def main():
                 st.info("所选时间范围内暂无记录")
 
             st.subheader(f"📊 {sel_month}月每日流水")
-            if not this_month[this_month['type'] == '支出'].empty:
-                daily = this_month[this_month['type'] == '支出'].groupby(this_month['date'].dt.day)[
+            if not actual_this_month[actual_this_month['type'] == '支出'].empty:
+                daily = actual_this_month[actual_this_month['type'] == '支出'].groupby(actual_this_month['date'].dt.day)[
                     'amount'].sum().reset_index()
                 daily.columns = ['日', '金额']
                 fig = px.bar(daily, x='日', y='金额', text='金额', color_discrete_sequence=['#EE6C4D'])
@@ -320,11 +365,12 @@ def main():
             with col_b2:
                 b_month = st.selectbox("月份", range(1, 13), index=today.month - 1, key='budget_month')
 
-            render_burndown_chart(df, budget, b_year, b_month)
+            actual_df = actual_transactions_df(df)
+            render_burndown_chart(actual_df, budget, b_year, b_month)
 
-            mask_budget_view = (df['date'].dt.year == b_year) & (df['date'].dt.month == b_month) & (
-                    df['type'] == '支出')
-            exp_df = df[mask_budget_view]
+            mask_budget_view = (actual_df['date'].dt.year == b_year) & (actual_df['date'].dt.month == b_month) & (
+                    actual_df['type'] == '支出')
+            exp_df = actual_df[mask_budget_view]
 
             if not exp_df.empty:
                 st.subheader(f"🛒 {b_month}月消费构成")
@@ -632,6 +678,7 @@ def main():
             "高级字段由系统自动计算，只读显示。"
         )
         manage_df = load_transactions()
+        st.caption(f"当前本地账本：{DB_FILE}；共 {len(manage_df)} 条记录。")
 
         if not manage_df.empty:
             manage_df['tags'] = manage_df['tags'].fillna('')
@@ -702,7 +749,7 @@ def main():
                 num_rows="dynamic",
                 width="stretch",
                 hide_index=True,
-                key="data_editor"
+                key=data_editor_key_for(active_manage_df)
             )
 
             if st.button("💾 保存数据修改", type="secondary"):

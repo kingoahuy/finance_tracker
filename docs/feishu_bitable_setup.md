@@ -97,6 +97,8 @@ FEISHU_BITABLE_TIMEOUT_SECONDS=15
 
 ## 仪表盘建议
 
+项目会自动维护第二张 `看板日指标` 表，用来承载 MTD/YTD、日均/月均、预算进度和月末预测。完整字段口径与搭建方式见 [飞书财务看板设计](feishu_dashboard_design.md)。
+
 在多维表格中基于同一数据表创建：
 
 - 本月收入：筛选本月、类型为收入，汇总金额。
@@ -108,7 +110,15 @@ FEISHU_BITABLE_TIMEOUT_SECONDS=15
 - 支出分类占比：筛选支出，按分类饼图。
 - 刚需与非刚需占比：按“是否刚需”分组。
 - 固定与非固定支出占比：按“是否固定”分组。
+- 餐补消费：用“是否使用餐补”筛选明细，对“餐补消费金额”求和；MTD/YTD 金额和占比直接使用`看板日指标`中的对应字段。
 - 最近流水：按日期、创建时间倒序的表格视图。
+
+首次升级后执行：
+
+```powershell
+.\.venv\Scripts\python.exe -m finance_tracker.bitable_sync --sync-dashboard-fields
+.\.venv\Scripts\python.exe -m finance_tracker.bitable_sync --sync-dashboard-daily
+```
 
 预算使用率需要在飞书侧设置预算常量或关联预算表；账本的真实预算统计仍以 SQLite/现有报告逻辑为准。
 

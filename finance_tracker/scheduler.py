@@ -26,6 +26,7 @@ if str(MODULE_DIR) not in sys.path:
 # 确保 email_service.py 在同一目录下
 from email_service import send_email_task
 from ledger import connect, init_db
+from data_cleanup import maybe_run_scheduled_cleanup
 
 
 def init_scheduler_db():
@@ -79,6 +80,18 @@ def check_and_run_jobs():
                 print(f"飞书多维表格同步：成功 {result['succeeded']}，失败 {result['failed']}。")
     except Exception as e:
         print(f"⚠️ 飞书多维表格重试失败: {e}")
+
+    try:
+        cleanup = maybe_run_scheduled_cleanup()
+        if cleanup.get("ran"):
+            print(
+                "账本无效数据清理："
+                f"本地删除 {cleanup.get('local_deleted_count', 0)} 条，"
+                f"飞书删除 {cleanup.get('remote_deleted_count', 0)} 条，"
+                f"远端测试行删除 {cleanup.get('remote_test_deleted_count', 0)} 条。"
+            )
+    except Exception as e:
+        print(f"⚠️ 账本无效数据定期清理失败: {type(e).__name__}")
 
 
 if __name__ == "__main__":

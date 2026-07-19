@@ -85,10 +85,17 @@ FEISHU_SYNC_RETRY_LIMIT=5
 DEEPSEEK_API_KEY=
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 DEEPSEEK_MODEL=deepseek-v4-flash
+DEEPSEEK_COMPLEX_MODEL=deepseek-v4-pro
+AI_PARSER_COMPLEX_MODEL_ENABLED=true
 AI_PARSER_ENABLED=true
 AI_PARSER_REQUIRE_CONFIRMATION=true
 AI_PARSER_TIMEOUT_SECONDS=15
+AI_PARSER_COMPLEX_TIMEOUT_SECONDS=35
+AI_PARSER_COMPLEX_MAX_TOKENS=2400
 AI_PARSER_FALLBACK_TO_LOCAL=true
+INVALID_DATA_CLEANUP_ENABLED=true
+INVALID_DATA_CLEANUP_HOUR=3
+INVALID_DATA_RETENTION_DAYS=30
 ```
 
 多个白名单 ID 使用英文逗号分隔。群聊中机器人仅在被 @ 时响应。
@@ -129,6 +136,7 @@ AI_PARSER_FALLBACK_TO_LOCAL=true
 - `撤销上一笔`
 - `删除 ID 12`
 - 普通记账文本，例如 `昨天打车36.5，晚饭42`
+- 重复记账文本，例如 `这一周每天收到了公司30的餐补`、`上周工作日每天地铁4元`
 
 记账、删除和修改默认需要在飞书卡片中二次确认，卡片 10 分钟后过期。重复确认不会重复写入。删除是软删除，仅限操作者本人在当前会话通过飞书创建的有效流水。
 
@@ -140,6 +148,12 @@ AI_PARSER_FALLBACK_TO_LOCAL=true
 
 # 幂等全量同步
 .\.venv\Scripts\python.exe -m finance_tracker.bitable_sync --full
+
+# 历史标签或字段治理后的批量对账
+.\.venv\Scripts\python.exe -m finance_tracker.bitable_sync --reconcile-all
+
+# 回读核对本地与飞书的 UID、核心字段和标签
+.\.venv\Scripts\python.exe -m finance_tracker.bitable_sync --audit-remote
 ```
 
 SQLite 是主数据源。飞书同步失败不会回滚本地账单，scheduler 会继续重试。
@@ -158,6 +172,15 @@ SQLite 是主数据源。飞书同步失败不会回滚本地账单，scheduler 
 ## 10. AI 解析与隐私
 
 - 仅当 `AI_PARSER_ENABLED=true` 且配置了密钥时，才会调用兼容 OpenAI 的 DeepSeek 接口。
+- Streamlit 记账强制使用 DeepSeek：先展示结构化草稿，确认后才写入；AI 不可用时不会退回本地规则直接记账。
+- 常规输入使用 `DEEPSEEK_MODEL`；复杂输入或结构不完整时升级 `DEEPSEEK_COMPLEX_MODEL`，若 Pro 草稿仅因笔数、日期或遗漏未通过校验，最多再修复一次。
+
+## 11. 定期清理无效数据
+
+- scheduler 每日到达 `INVALID_DATA_CLEANUP_HOUR` 后执行一次清理，默认凌晨 3 点。
+- 自动删除范围仅包括：明确测试 UID、日期/类型/金额等关键结构非法的行，以及超过 `INVALID_DATA_RETENTION_DAYS` 且已同步的软删除行。
+- 有 `feishu_record_id` 的记录必须先成功删除飞书行，之后才删除 SQLite 行；远端失败时保留本地记录，避免数据失配。
+- 清理结果只记录数量、UID 前缀和原因，不记录完整账单描述。
 
 ## DeepSeek 智能对话边界
 
@@ -173,6 +196,8 @@ DeepSeek 只负责把用户消息解析为结构化 JSON，包括意图、交易
 - 处理卡片确认以及“确认、可以、记上、取消、算了”等文本操作；
 - 执行 SQLite 写入并沿用原有多维表格同步；
 - AI 超时、JSON 错误或低置信度时回退本地规则。
+- 明确的重复周期由本地规则逐日展开；复杂输入先用 V4 Flash，结构不完整时才升级 V4 Pro。
+- 标签由本地事实规则收敛为最多 3 个，不接受 AI 无依据的新标签。
 
 短期上下文保存在 `feishu_sessions`。身份只保存 SHA-256 哈希，会话只保留最近
 必要的交易草稿和意图摘要，默认 10 分钟过期。

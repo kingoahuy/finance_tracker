@@ -37,6 +37,8 @@ class DerivedFieldsTest(unittest.TestCase):
         self.assertEqual(result["is_income"], 0)
         self.assertEqual(result["is_expense"], 1)
         self.assertEqual(result["is_active"], 1)
+        self.assertEqual(result["is_meal_subsidy_used"], 0)
+        self.assertEqual(result["meal_subsidy_expense_amount"], 0.0)
         self.assertEqual(result["ledger_month"], "2026-06")
         self.assertEqual(result["data_version"], DATA_VERSION)
         self.assertEqual(result["_derived_error"], "")
@@ -70,6 +72,31 @@ class DerivedFieldsTest(unittest.TestCase):
         )
         self.assertEqual(result["is_active"], 0)
         self.assertEqual(result["net_amount"], -25.0)
+
+    def test_explicit_meal_subsidy_expense_is_additive(self):
+        result = enrich_transaction_fields(
+            {
+                "date": "2026-07-18",
+                "type": "支出",
+                "amount": 29,
+                "description": "用餐补买晚饭",
+                "status": "active",
+            }
+        )
+        self.assertEqual(result["is_meal_subsidy_used"], 1)
+        self.assertEqual(result["meal_subsidy_expense_amount"], 29.0)
+
+        income = enrich_transaction_fields(
+            {
+                "date": "2026-07-18",
+                "type": "收入",
+                "amount": 30,
+                "description": "公司餐补",
+                "status": "active",
+            }
+        )
+        self.assertEqual(income["is_meal_subsidy_used"], 0)
+        self.assertEqual(income["meal_subsidy_expense_amount"], 0.0)
 
     def test_invalid_date_returns_diagnostic_error(self):
         result = enrich_transaction_fields(

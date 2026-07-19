@@ -1,7 +1,7 @@
 import datetime
 import unittest
 
-from finance_tracker.derived_fields import DERIVED_FIELD_LABELS
+from finance_tracker.derived_fields import DATA_VERSION, DERIVED_FIELD_LABELS
 from finance_tracker.bitable_sync import FIELD_MAP, transaction_to_bitable_fields
 
 
@@ -15,7 +15,7 @@ class BitableMappingTest(unittest.TestCase):
                 "type": "支出",
                 "category": "餐饮",
                 "amount": 25.5,
-                "description": "午饭",
+                "description": "用餐补买午饭",
                 "tags": "旅行,刚需",
                 "is_need": 1,
                 "is_fixed": 0,
@@ -49,7 +49,13 @@ class BitableMappingTest(unittest.TestCase):
         self.assertTrue(fields[FIELD_MAP["is_expense"]])
         self.assertTrue(fields[FIELD_MAP["is_active"]])
         self.assertEqual(fields[FIELD_MAP["ledger_month"]], "2026-06")
-        self.assertEqual(fields[FIELD_MAP["data_version"]], "derived-v1")
+        self.assertEqual(fields[FIELD_MAP["data_version"]], DATA_VERSION)
+        self.assertEqual(fields[FIELD_MAP["dashboard_expense_amount"]], 25.5)
+        self.assertTrue(fields[FIELD_MAP["is_meal_subsidy_used"]])
+        self.assertEqual(
+            fields[FIELD_MAP["meal_subsidy_expense_amount"]],
+            25.5,
+        )
         for label in DERIVED_FIELD_LABELS.values():
             self.assertIn(label, fields)
 

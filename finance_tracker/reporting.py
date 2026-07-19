@@ -5,10 +5,12 @@ from collections import defaultdict
 import pandas as pd
 
 try:
+    from .advance_payment import actual_transactions_df, personal_advance_summary
     from .email_service import generate_report_content
     from .ledger import MONTHLY_BUDGET, load_transactions
     from .tagging import clean_tags
 except ImportError:
+    from advance_payment import actual_transactions_df, personal_advance_summary
     from email_service import generate_report_content
     from ledger import MONTHLY_BUDGET, load_transactions
     from tagging import clean_tags
@@ -22,9 +24,13 @@ UNKNOWN = "暂无数据"
 
 def build_monthly_bill_payload(month=None):
     target_month = normalize_month(month)
-    month_df = _month_df(_active_transactions(), target_month)
+    df = _active_transactions()
+    month_df = _month_df(df, target_month)
+    _, month_end = month_range(target_month)
+    balance_df = df[df["date_only"] <= month_end].copy() if not df.empty else df
+    personal_advance = personal_advance_summary(month_df, balance_df=balance_df)
+    month_df = actual_transactions_df(month_df)
     expense_df = _type_df(month_df, EXPENSE_TYPE)
-    income_df = _type_df(month_df, INCOME_TYPE)
     today = datetime.date.today()
     today_expense = (
         _sum_amount(expense_df[expense_df["date_only"] == today])
@@ -37,12 +43,14 @@ def build_monthly_bill_payload(month=None):
         "month": target_month,
         "currency": CURRENCY,
         "generated_at": _generated_at(),
+        "data_scope": _data_scope(),
         "overview": _monthly_overview(month_df, target_month, today_expense),
         "budget": _budget_payload(_sum_amount(expense_df)),
         "top_categories": _category_summary(expense_df),
         "top_tags": _tag_summary(expense_df),
         "top_expenses": _top_expenses(expense_df),
         "compare_previous_month": _compare_previous_month(target_month),
+        "personal_advance": personal_advance,
     }
 
 
@@ -51,6 +59,10 @@ def build_daily_report_payload(date=None):
     df = _active_transactions()
     day_df = df[df["date_only"] == target_date] if not df.empty else df
     month_to_date_df = _month_to_date_df(df, target_date)
+    balance_df = df[df["date_only"] <= target_date].copy() if not df.empty else df
+    personal_advance = personal_advance_summary(day_df, balance_df=balance_df)
+    day_df = actual_transactions_df(day_df)
+    month_to_date_df = actual_transactions_df(month_to_date_df)
     expense_df = _type_df(day_df, EXPENSE_TYPE)
 
     return {
@@ -58,6 +70,7 @@ def build_daily_report_payload(date=None):
         "date": target_date.isoformat(),
         "currency": CURRENCY,
         "generated_at": _generated_at(),
+        "data_scope": _data_scope(),
         "email_daily_report_markdown": _email_daily_markdown(df, target_date),
         "overview": {
             "income": _money(_sum_type(day_df, INCOME_TYPE)),
@@ -73,12 +86,18 @@ def build_daily_report_payload(date=None):
         "tag_summary": _tag_summary(expense_df),
         "transactions": _transaction_rows(day_df, limit=10),
         "budget": _budget_payload(_sum_type(month_to_date_df, EXPENSE_TYPE)),
+        "personal_advance": personal_advance,
     }
 
 
 def build_monthly_tag_analysis_payload(month=None):
     target_month = normalize_month(month)
-    month_df = _month_df(_active_transactions(), target_month)
+    df = _active_transactions()
+    month_df = _month_df(df, target_month)
+    _, month_end = month_range(target_month)
+    balance_df = df[df["date_only"] <= month_end].copy() if not df.empty else df
+    personal_advance = personal_advance_summary(month_df, balance_df=balance_df)
+    month_df = actual_transactions_df(month_df)
     expense_df = _type_df(month_df, EXPENSE_TYPE)
     tagged_count = _tagged_transaction_count(expense_df)
     total_count = int(len(expense_df))
@@ -88,6 +107,7 @@ def build_monthly_tag_analysis_payload(month=None):
         "month": target_month,
         "currency": CURRENCY,
         "generated_at": _generated_at(),
+        "data_scope": _data_scope(),
         "overview": {
             "total_expense": _money(_sum_amount(expense_df)),
             "transaction_count": total_count,
@@ -98,12 +118,18 @@ def build_monthly_tag_analysis_payload(month=None):
         "tag_summary": _tag_summary(expense_df),
         "tag_groups": _tag_groups(expense_df),
         "compare_previous_month": _compare_previous_month(target_month),
+        "personal_advance": personal_advance,
     }
 
 
 def build_monthly_consumption_report_payload(month=None):
     target_month = normalize_month(month)
-    month_df = _month_df(_active_transactions(), target_month)
+    df = _active_transactions()
+    month_df = _month_df(df, target_month)
+    _, month_end = month_range(target_month)
+    balance_df = df[df["date_only"] <= month_end].copy() if not df.empty else df
+    personal_advance = personal_advance_summary(month_df, balance_df=balance_df)
+    month_df = actual_transactions_df(month_df)
     expense_df = _type_df(month_df, EXPENSE_TYPE)
 
     return {
@@ -111,6 +137,7 @@ def build_monthly_consumption_report_payload(month=None):
         "month": target_month,
         "currency": CURRENCY,
         "generated_at": _generated_at(),
+        "data_scope": _data_scope(),
         "overview": _monthly_overview(month_df, target_month),
         "budget": _budget_payload(
             _sum_amount(expense_df),
@@ -132,6 +159,7 @@ def build_monthly_consumption_report_payload(month=None):
         "daily_trend": _daily_trend(month_df, target_month),
         "top_expenses": _top_expenses(expense_df),
         "compare_previous_month": _compare_previous_month(target_month),
+        "personal_advance": personal_advance,
     }
 
 
@@ -144,6 +172,7 @@ def generate_daily_report(target_date=None):
 def generate_monthly_report(month=None):
     payload = build_monthly_bill_payload(month)
     overview = payload["overview"]
+    advance = payload.get("personal_advance") or {}
     lines = [
         f"# 记账月报 {payload['month']}",
         "",
@@ -151,6 +180,11 @@ def generate_monthly_report(month=None):
         f"- 支出: ¥{overview['expense']:.2f}",
         f"- 结余: ¥{overview['balance']:.2f}",
         f"- 交易笔数: {overview['transaction_count']}",
+        "",
+        "## 个人垫付（单独列示）",
+        f"- 垫付支出: ¥{advance.get('advance_expense', 0):.2f}",
+        f"- 垫付回款: ¥{advance.get('advance_reimbursement', 0):.2f}",
+        f"- 当前余额: ¥{advance.get('current_balance', 0):.2f}",
         "",
         "## 支出 Top 10",
         *_expense_markdown_lines(payload["top_expenses"]),
@@ -165,6 +199,8 @@ def generate_yearly_report(year=None):
         year_df = df[df["date"].dt.year == target_year]
     else:
         year_df = df
+    advance = personal_advance_summary(year_df)
+    year_df = actual_transactions_df(year_df)
     income = _sum_type(year_df, INCOME_TYPE)
     expense = _sum_type(year_df, EXPENSE_TYPE)
     return "\n".join(
@@ -175,6 +211,11 @@ def generate_yearly_report(year=None):
             f"- 年度支出: ¥{expense:.2f}",
             f"- 年度结余: ¥{income - expense:.2f}",
             f"- 交易笔数: {len(year_df)}",
+            "",
+            "## 个人垫付（单独列示）",
+            f"- 垫付支出: ¥{advance['advance_expense']:.2f}",
+            f"- 垫付回款: ¥{advance['advance_reimbursement']:.2f}",
+            f"- 当前余额: ¥{advance['current_balance']:.2f}",
         ]
     ).strip()
 
@@ -385,9 +426,9 @@ def _transaction_rows(df, limit=10):
 
 
 def _compare_previous_month(month):
-    current_df = _month_df(_active_transactions(), month)
+    current_df = actual_transactions_df(_month_df(_active_transactions(), month))
     previous_month = _previous_month(month)
-    previous_df = _month_df(_active_transactions(), previous_month)
+    previous_df = actual_transactions_df(_month_df(_active_transactions(), previous_month))
     current = _period_totals(current_df)
     previous = _period_totals(previous_df)
     return {
@@ -557,3 +598,7 @@ def _percent(numerator, denominator):
 
 def _generated_at():
     return datetime.datetime.now().replace(microsecond=0).isoformat()
+
+
+def _data_scope():
+    return "收入、支出、预算、分类、标签和趋势统计均不含个人垫付；个人垫付在 personal_advance 中单独列示。"

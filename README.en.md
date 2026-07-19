@@ -45,6 +45,7 @@ Finance Tracker Pro is designed around a simpler workflow:
 - **Analyze from your computer**: use the Streamlit dashboard to review categories, trends, budgets, and reports.
 - **Receive daily feedback**: generate daily summaries automatically.
 - **Own your data**: keep the SQLite database and sensitive configuration locally.
+- **Use a two-layer Bitable model**: transaction facts explain spending structure while daily snapshots power MTD/YTD metrics.
 
 ---
 
@@ -54,15 +55,40 @@ Finance Tracker Pro is designed around a simpler workflow:
 | --- | --- |
 | Web tracking and analytics | Streamlit-based entry, filtering, statistics, and trend charts |
 | Feishu mobile tracking | Record expenses by sending natural language messages to a Feishu bot |
-| AI parsing | Optionally use DeepSeek to parse natural language into structured transactions |
+| AI parsing | Expand clear recurrences locally; use DeepSeek V4 Flash normally and retry V4 Pro only for complex or structurally incomplete parses |
 | Local parser fallback | Fall back to local rule-based parsing when AI is unavailable |
 | Confirmation cards | Confirm create, delete, and update actions before database writes |
 | SQLite storage | Store the account book locally |
 | Email reports | Generate and send daily finance summaries by email |
 | Feishu reports | Push daily reports to Feishu conversations |
-| Bitable sync | Sync transaction records one-way to Feishu Bitable |
-| Scheduler | Run automated reports, sync tasks, and background services |
+| Personal advance accounting | Track advances, reimbursements, and outstanding balance separately from ordinary finances |
+| Bitable sync | Sync transaction facts and daily metric snapshots for MTD/YTD, rolling averages, and budget pacing |
+| Complete scene tags | Keep tags compact and evidence-backed, with explicit category-scene fallbacks so active historical rows are never untagged |
+| Batch reconciliation | Batch-create/update transactions by UID, then read Feishu back and compare core fields and tags |
+| DeepSeek web bookkeeping | Use the same Flash-to-Pro parsing policy as Feishu and write only after draft confirmation |
+| Scheduled invalid-row cleanup | Conservatively remove test/structurally invalid rows and synced soft deletes after retention |
+| Dashboard-safe measures | Use additive income, expense, need/want, and fixed/variable fields without rebuilding filters |
+| Meal-subsidy usage | Identify explicitly evidenced meal-subsidy spending and expose additive amounts plus MTD/YTD shares |
+| Non-blocking incremental sync | Queue, claim, retry, and recover sync jobs without delaying user-facing bookkeeping replies |
+| Scheduler | Run automated reports, daily metric snapshots, sync tasks, and background services |
 | Privacy protection | Keep `.env`, database files, logs, exports, and backups out of Git |
+
+### Latest Progress
+
+- Rebuilt active history to exactly three evidence-backed tags per transaction, using deterministic transaction facts instead of guessing missing scenes.
+- Added meal-subsidy usage flags, additive spend, and MTD/YTD meal-subsidy spend shares; subsidy income and ordinary meals are excluded.
+- Feishu natural-language bookkeeping now supports a weekday recurrence plus a separately dated one-off item in the same message, with category and tag evidence isolated per item.
+- Chinese date ranges accept common separators such as `到`, `至`, and `-`; parsed drafts still require confirmation, and retried Feishu events remain idempotent by event ID.
+- Added a two-layer Feishu Bitable model: transaction facts plus one daily metric snapshot per calendar day.
+- Added MTD/YTD income, expense, net, daily/monthly averages, savings rates, budget pacing, and projected month-end spending.
+- Excluded personal advances from ordinary income, expense, budget, category, tag, and trend metrics while reporting them separately across Streamlit, email, Feishu, and DeepSeek reports.
+- Added sync-job claiming and stale-job recovery to reduce duplicate processing across background workers.
+- Added full UID-based Bitable reconciliation and read-back consistency checks for historical tag or field migrations.
+- Switched Streamlit bookkeeping to DeepSeek-only parsing with explicit confirmation and no silent local fallback.
+- Added a bookkeeping-only prompt, tolerant JSON extraction, and a separate Pro timeout for reliable web drafts.
+- Added one bounded Pro repair pass when an otherwise valid draft fails count, date, or completeness checks.
+- Added daily remote-first cleanup so deleting stale invalid rows cannot create Feishu orphans.
+- Added configurable output-token limits for AI parsing and DeepSeek reports.
 
 ---
 
@@ -95,7 +121,8 @@ flowchart LR
         J[Streamlit analytics]
         K[Email daily report]
         L[Feishu daily report]
-        M[Feishu Bitable]
+        M1[Feishu transaction facts]
+        M2[Feishu daily metrics]
     end
 
     A --> D
@@ -111,7 +138,8 @@ flowchart LR
     I --> J
     I --> K
     I --> L
-    I --> M
+    I --> M1
+    I --> M2
 ```
 
 ---
@@ -206,6 +234,7 @@ Documentation:
 
 - [Feishu bot setup guide](docs/feishu_setup.md)
 - [Feishu Bitable setup guide](docs/feishu_bitable_setup.md)
+- [Feishu finance dashboard design](docs/feishu_dashboard_design.md)
 
 ---
 
@@ -247,6 +276,18 @@ $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
 .\stop_services.bat    # Stop all services
 ```
 
+### Feishu Dashboard Data
+
+```powershell
+# Create and backfill dashboard-safe fields in the transaction table
+.\.venv\Scripts\python.exe -m finance_tracker.bitable_sync --sync-dashboard-fields
+
+# Create or refresh daily MTD/YTD metric snapshots
+.\.venv\Scripts\python.exe -m finance_tracker.bitable_sync --sync-dashboard-daily
+```
+
+Normal create, update, and delete operations refresh affected dates incrementally. These commands are mainly for first-time setup or manual repair.
+
 ### Startup Task
 
 ```powershell
@@ -267,9 +308,13 @@ finance_tracker/
   tagging.py                # Category and tag management
   email_service.py          # Email report generation and SMTP delivery
   scheduler.py              # Background scheduler
+  data_cleanup.py           # Conservative local/Feishu invalid-row cleanup
   account_ops.py            # CLI utilities
   service_runner.py         # Process management
   ai_parser.py              # DeepSeek natural language parser
+  streamlit_bookkeeping.py  # DeepSeek draft, confirmation, and web write path
+  advance_payment.py        # Personal-advance classification and balance logic
+  dashboard_metrics.py      # Daily MTD/YTD dashboard snapshots
   transaction_service.py    # Transaction parsing, validation, and operations
   feishu_bot.py             # Feishu long-connection bot entrypoint
   feishu_client.py          # Feishu Open API wrapper
@@ -288,6 +333,7 @@ scripts/
 docs/
   feishu_setup.md               # Feishu bot setup guide
   feishu_bitable_setup.md       # Feishu Bitable setup guide
+  feishu_dashboard_design.md    # Dashboard metric definitions and layout guide
 ```
 
 ---
@@ -334,8 +380,9 @@ Yes. The project provides scripts for starting services and installing a Windows
 
 ## Roadmap
 
-- [ ] Enhanced Feishu custom menu
-- [ ] Feishu BI dashboard
+- [x] Enhanced Feishu custom menu
+- [x] Feishu BI two-layer model and MTD/YTD metrics
+- [x] Personal advance accounting
 - [ ] Monthly budget alerts
 - [ ] Bill import workflow
 - [ ] Improved data backup and restore

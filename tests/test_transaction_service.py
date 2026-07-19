@@ -204,6 +204,49 @@ class TransactionServiceTest(unittest.TestCase):
         self.assertEqual(summary["balance"], 900)
         self.assertEqual(summary["top_categories"][0]["category"], "餐饮")
 
+    def test_month_summary_excludes_personal_advance_tag(self):
+        with mock.patch.object(transaction_service, "_try_sync"):
+            transaction_service.create_transaction(
+                {
+                    "date": "2026-06-01",
+                    "type": "支出",
+                    "category": "餐饮",
+                    "amount": 100,
+                    "description": "午饭",
+                    "tags": "餐饮",
+                },
+                auto_sync=False,
+            )
+            transaction_service.create_transaction(
+                {
+                    "date": "2026-06-02",
+                    "type": "支出",
+                    "category": "其他",
+                    "amount": 45,
+                    "description": "垫付标书费用",
+                    "tags": "个人垫付,标书",
+                },
+                auto_sync=False,
+            )
+            transaction_service.create_transaction(
+                {
+                    "date": "2026-06-10",
+                    "type": "收入",
+                    "category": "报销",
+                    "amount": 20,
+                    "description": "收到垫付款",
+                    "tags": "个人垫付",
+                },
+                auto_sync=False,
+            )
+
+        summary = transaction_service.get_month_summary("2026-06-30")
+
+        self.assertEqual(summary["income"], 0)
+        self.assertEqual(summary["expense"], 100)
+        self.assertEqual(summary["balance"], -100)
+        self.assertEqual(summary["top_categories"][0]["category"], "餐饮")
+
     def test_create_transaction_syncs_original_detail_only(self):
         with mock.patch.object(transaction_service, "_try_sync") as sync:
             created = transaction_service.create_transaction(
@@ -246,18 +289,22 @@ class TransactionServiceTest(unittest.TestCase):
             ]
         )
 
-    @mock.patch("finance_tracker.bitable_sync.sync_transaction")
     @mock.patch(
         "finance_tracker.bitable_sync.auto_sync_enabled",
         return_value=True,
     )
-    def test_try_sync_updates_original_detail_table_only(
+    @mock.patch.object(transaction_service, "schedule_pending_sync")
+    def test_try_sync_schedules_pending_outbox_without_blocking(
         self,
+        schedule_pending_sync,
         _auto_sync_enabled,
-        sync_transaction,
     ):
-        transaction_service._try_sync("uid-1")
-        sync_transaction.assert_called_once_with("uid-1")
+        schedule_pending_sync.return_value = True
+
+        result = transaction_service._try_sync("uid-1")
+
+        self.assertTrue(result)
+        schedule_pending_sync.assert_called_once_with()
 
 
 if __name__ == "__main__":

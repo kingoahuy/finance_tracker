@@ -17,6 +17,7 @@ try:
         derived_values,
         enrich_transaction_fields,
     )
+    from .advance_payment import text_mentions_personal_advance
     from .tagging import generate_tags
 except ImportError:
     from config import PROJECT_ROOT, load_env_file
@@ -26,6 +27,7 @@ except ImportError:
         derived_values,
         enrich_transaction_fields,
     )
+    from advance_payment import text_mentions_personal_advance
     from tagging import generate_tags
 
 load_env_file()
@@ -51,6 +53,7 @@ CATEGORIES = [
     "退款",
     "退税",
     "报销",
+    "补贴",
     "红包",
     "其他",
 ]
@@ -67,6 +70,13 @@ SPECIAL_TAG_RULES = [
 ]
 
 INCOME_KEYWORDS = {
+    "餐费补贴": "补贴",
+    "伙食补贴": "补贴",
+    "交通补贴": "补贴",
+    "住房补贴": "补贴",
+    "餐补": "补贴",
+    "津贴": "补贴",
+    "补贴": "补贴",
     "工资": "工资",
     "奖金": "奖金",
     "兼职": "兼职",
@@ -189,7 +199,9 @@ LEADING_NOISE_RE = re.compile(
     r"^(?:又|然后|还有|顺便|今天|昨天|前天|早上|上午|中午|下午|晚上|夜里|凌晨|去|在|到|了)+"
 )
 LEADING_ACTION_RE = re.compile(
-    r"^(?:花了|花|买了|买|付了|付|支付了|支付|交了|交|缴了|缴|吃了|吃|喝了|喝|住了|住|订阅了|订阅|开通了|开通|充了|充|用了|用|买的)+"
+    r"^(?:收到了|收到|到账了|到账|入账了|入账|"
+    r"花了|花|买了|买|付了|付|支付了|支付|交了|交|缴了|缴|"
+    r"吃了|吃|喝了|喝|住了|住|订阅了|订阅|开通了|开通|充了|充|用了|用|买的)+"
 )
 PAYMENT_SPLIT_RE = re.compile(r"(?:花了|花|付了|付|支付了|支付|交了|交|缴了|缴)")
 
@@ -315,6 +327,15 @@ def init_db():
                 last_intent TEXT,
                 expires_at TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dashboard_sync_state (
+                key TEXT PRIMARY KEY,
+                value TEXT,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             """
@@ -569,7 +590,7 @@ def load_transactions(include_deleted=False):
                     status,
                     {DERIVED_COLUMN_SQL}
                 FROM transactions
-                WHERE (? = 1 OR status = 'active')
+                WHERE (? = 1 OR COALESCE(status, 'active') = 'active')
                 ORDER BY date DESC, rowid DESC
                 """,
                 conn,
@@ -770,7 +791,8 @@ def backfill_derived_fields(apply=False, example_limit=10):
     with connect() as conn:
         rows = conn.execute(
             f"""
-            SELECT rowid, id, transaction_uid, date, type, amount, tags, status,
+            SELECT rowid, id, transaction_uid, date, type, category, amount,
+                   description, tags, is_need, is_fixed, status,
                    {DERIVED_COLUMN_SQL}
             FROM transactions
             ORDER BY rowid ASC
@@ -781,12 +803,16 @@ def backfill_derived_fields(apply=False, example_limit=10):
             base = {
                 "date": row[3],
                 "type": row[4],
-                "amount": row[5],
-                "tags": row[6],
-                "status": row[7] or "active",
+                "category": row[5],
+                "amount": row[6],
+                "description": row[7],
+                "tags": row[8],
+                "is_need": row[9],
+                "is_fixed": row[10],
+                "status": row[11] or "active",
             }
             desired = derived_values(base)
-            current = tuple(row[8:8 + len(DERIVED_COLUMNS)])
+            current = tuple(row[12:12 + len(DERIVED_COLUMNS)])
             if _derived_tuple_equal(current, desired):
                 continue
             planned.append(
@@ -797,8 +823,8 @@ def backfill_derived_fields(apply=False, example_limit=10):
                     "transaction_uid_prefix": str(row[2] or "")[:8],
                     "date": str(row[3] or ""),
                     "type": str(row[4] or ""),
-                    "amount": float(row[5] or 0),
-                    "status": str(row[7] or "active"),
+                    "amount": float(row[6] or 0),
+                    "status": str(row[11] or "active"),
                     "derived": dict(zip(DERIVED_COLUMNS, desired)),
                 }
             )
@@ -1190,11 +1216,338 @@ def _utc_text(value=None):
 
 def parse_entry_text(text, default_date=None):
     base_date = _coerce_date(default_date or datetime.date.today())
+    recurring = parse_recurring_entry_text(text, base_date)
+    if recurring:
+        return recurring
     parts = split_date_chunks(text or "", base_date)
     records = []
     for entry_date, part in parts:
         records.extend(parse_amount_entries(part, entry_date))
     return records
+
+
+RECURRENCE_CADENCE_RE = re.compile(
+    r"(?:从)?周一(?:到|至)周五(?:每天|每日)?|"
+    r"工作日每天|每个工作日|每工作日|每周一至周五|每天|每日|每周[一二三四五六日天]"
+)
+RECURRENCE_SCOPE_RE = re.compile(
+    r"这一周|这周|本周|上一周|上周|这个月|本月|上个月|"
+    r"(?:过去|最近|连续)[零〇一二两三四五六七八九十百\d]+天"
+)
+CHINESE_DATE_RANGE_RE = re.compile(
+    r"(?:(\d{4})年)?(\d{1,2})月(\d{1,2})日?\s*"
+    r"(?:到|至|-|~|～|—)\s*"
+    r"(?:(\d{4})年)?(?:(\d{1,2})月)?(\d{1,2})日?"
+)
+ISO_DATE_RANGE_RE = re.compile(
+    r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})\s*"
+    r"(?:到|至|~|～|—)\s*"
+    r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})"
+)
+RECURRENCE_NARRATION_RE = re.compile(
+    r"^(?:我说(?:一下)?|帮我|麻烦|请|记一下|记录一下|记账|我)?"
+)
+RECURRENCE_ACTION_RE = re.compile(
+    r"收到(?:了)?|收到了|到账(?:了)?|发放(?:了)?|发了|给了|"
+    r"花了|花|支付(?:了)?|付了|付|消费(?:了)?|支出(?:了)?|买了|买|"
+    r"每天|每日|工作日"
+)
+RECURRENCE_CLAUSE_SPLIT_RE = re.compile(r"[，,；;。\n]+")
+WEEKDAY_REFERENCE_RE = re.compile(r"(?:在)?周([一二三四五六日天])")
+NON_TRANSACTION_CLAUSE_RE = re.compile(
+    r"^(?:这|那)?(?:五|这些|上述)?天|"
+    r"^(?:请)?(?:帮我)?(?:分笔|分别|逐笔|每笔)(?:记录|记账)?$|"
+    r"^(?:请)?(?:帮我)?(?:记录|记账)(?:一下)?$"
+)
+
+
+def looks_like_recurring_entry(text):
+    value = re.sub(r"\s+", "", str(text or ""))
+    has_cadence = bool(RECURRENCE_CADENCE_RE.search(value))
+    has_scope = bool(
+        RECURRENCE_SCOPE_RE.search(value)
+        or CHINESE_DATE_RANGE_RE.search(value)
+        or ISO_DATE_RANGE_RE.search(value)
+    )
+    return has_cadence and has_scope
+
+
+def recurring_dates_for_text(text, default_date=None, max_occurrences=92):
+    """Resolve a bounded, completed recurrence schedule without inferring facts."""
+    base_date = _coerce_date(default_date or datetime.date.today())
+    value = re.sub(r"\s+", "", str(text or ""))
+    cadence_match = RECURRENCE_CADENCE_RE.search(value)
+    if not cadence_match:
+        return []
+
+    start = end = None
+    iso_match = ISO_DATE_RANGE_RE.search(value)
+    chinese_match = CHINESE_DATE_RANGE_RE.search(value)
+    if iso_match:
+        sy, sm, sd, ey, em, ed = (int(item) for item in iso_match.groups())
+        start = datetime.date(sy, sm, sd)
+        end = datetime.date(ey, em, ed)
+    elif chinese_match:
+        sy, sm, sd, ey, em, ed = chinese_match.groups()
+        start = datetime.date(int(sy or base_date.year), int(sm), int(sd))
+        end = datetime.date(
+            int(ey or start.year),
+            int(em or start.month),
+            int(ed),
+        )
+    else:
+        scope_match = RECURRENCE_SCOPE_RE.search(value)
+        if not scope_match:
+            return []
+        scope = scope_match.group(0)
+        if scope in {"这一周", "这周", "本周"}:
+            start = base_date - datetime.timedelta(days=base_date.weekday())
+            end = base_date
+        elif scope in {"上一周", "上周"}:
+            start = base_date - datetime.timedelta(days=base_date.weekday() + 7)
+            end = start + datetime.timedelta(days=6)
+        elif scope in {"这个月", "本月"}:
+            start = base_date.replace(day=1)
+            end = base_date
+        elif scope == "上个月":
+            end = base_date.replace(day=1) - datetime.timedelta(days=1)
+            start = end.replace(day=1)
+        else:
+            number_match = re.search(r"[零〇一二两三四五六七八九十百\d]+", scope)
+            day_count = _parse_cn_integer(number_match.group(0)) if number_match else 0
+            if not 1 <= day_count <= max_occurrences:
+                return []
+            end = base_date
+            start = end - datetime.timedelta(days=day_count - 1)
+
+    if not start or not end or end < start or end > base_date:
+        return []
+    total_days = (end - start).days + 1
+    if total_days > max_occurrences:
+        return []
+
+    cadence = cadence_match.group(0)
+    target_weekday = None
+    weekday_match = re.fullmatch(r"每周([一二三四五六日天])", cadence)
+    if weekday_match:
+        target_weekday = "一二三四五六日".index(
+            "日" if weekday_match.group(1) == "天" else weekday_match.group(1)
+        )
+
+    dates = []
+    for offset in range(total_days):
+        item = start + datetime.timedelta(days=offset)
+        if (
+            cadence in {"工作日每天", "每个工作日", "每工作日", "每周一至周五"}
+            or re.fullmatch(r"(?:从)?周一(?:到|至)周五(?:每天|每日)?", cadence)
+        ):
+            if item.weekday() >= 5:
+                continue
+        elif target_weekday is not None and item.weekday() != target_weekday:
+            continue
+        dates.append(item)
+    return dates if len(dates) <= max_occurrences else []
+
+
+def recurring_amount_count(text):
+    """Count explicit per-occurrence amounts after removing date/frequency numbers."""
+    value = re.sub(r"\s+", "", str(text or ""))
+    value = ISO_DATE_RANGE_RE.sub("", value, count=1)
+    value = CHINESE_DATE_RANGE_RE.sub("", value, count=1)
+    value = RECURRENCE_SCOPE_RE.sub("", value, count=1)
+    value = RECURRENCE_CADENCE_RE.sub("", value, count=1)
+    return len(AMOUNT_RE.findall(value))
+
+
+def parse_recurring_entry_text(text, default_date=None):
+    """Expand clear recurrences, including one-off items in the same sentence."""
+    base_date = _coerce_date(default_date or datetime.date.today())
+    raw_text = str(text or "")
+    if any(keyword in raw_text for keyword in ("多少", "几笔", "合计", "总共", "统计")):
+        return []
+    if not looks_like_recurring_entry(raw_text):
+        return []
+
+    clauses = [
+        clause.strip()
+        for clause in RECURRENCE_CLAUSE_SPLIT_RE.split(raw_text)
+        if clause.strip()
+    ]
+    cadence_indexes = [
+        index for index, clause in enumerate(clauses)
+        if RECURRENCE_CADENCE_RE.search(re.sub(r"\s+", "", clause))
+    ]
+    if len(cadence_indexes) != 1:
+        return []
+
+    cadence_index = cadence_indexes[0]
+    recurrence_indexes = {cadence_index}
+    cadence_clause = clauses[cadence_index]
+    if not _has_recurrence_scope(cadence_clause) and cadence_index > 0:
+        previous_clause = clauses[cadence_index - 1]
+        if _has_recurrence_scope(previous_clause) and not _has_transaction_amount(previous_clause):
+            recurrence_indexes.add(cadence_index - 1)
+    recurrence_text = "，".join(
+        clause for index, clause in enumerate(clauses)
+        if index in recurrence_indexes
+    )
+
+    records = _parse_single_recurring_entry(recurrence_text, base_date)
+    if not records:
+        return []
+    recurrence_dates = [_coerce_date(record["date"]) for record in records]
+
+    for index, clause in enumerate(clauses):
+        if index in recurrence_indexes:
+            continue
+        if not AMOUNT_RE.search(clause):
+            if _is_non_transaction_clause(clause):
+                continue
+            return []
+        one_off_records = _parse_one_off_recurrence_clause(
+            clause,
+            base_date,
+            recurrence_dates,
+        )
+        if not one_off_records:
+            return []
+        records.extend(one_off_records)
+
+    if len(records) > 100:
+        return []
+    if any(_coerce_date(record["date"]) > base_date for record in records):
+        return []
+    return records
+
+
+def _parse_single_recurring_entry(text, base_date, raw_text=None):
+    dates = recurring_dates_for_text(text, base_date)
+    if not dates:
+        return []
+
+    value = re.sub(r"\s+", "", str(text or ""))
+    value = ISO_DATE_RANGE_RE.sub("", value, count=1)
+    value = CHINESE_DATE_RANGE_RE.sub("", value, count=1)
+    value = RECURRENCE_SCOPE_RE.sub("", value, count=1)
+    value = RECURRENCE_CADENCE_RE.sub("", value, count=1)
+    amount_matches = list(AMOUNT_RE.finditer(value))
+    if len(amount_matches) != 1:
+        return []
+    amount = float(amount_matches[0].group(1))
+    if not 0 < amount <= 100000000:
+        return []
+
+    txn_type, category = classify_text(str(text or ""))
+    description_text = (
+        value[: amount_matches[0].start()] + value[amount_matches[0].end() :]
+    )
+    description = _clean_recurring_description(description_text, category)
+    is_need = int(txn_type == "支出" and category in NEED_CATEGORIES)
+    is_fixed = int(
+        any(keyword.lower() in description.lower() for keyword in FIXED_KEYWORDS)
+    )
+    records = []
+    for item_date in dates:
+        date_value = item_date.isoformat()
+        tags = generate_tags(
+            {
+                "date": date_value,
+                "type": txn_type,
+                "category": category,
+                "amount": amount,
+                "description": description,
+                "is_need": is_need,
+                "is_fixed": is_fixed,
+            },
+            raw_text=raw_text or text,
+            preserve_existing=False,
+        )
+        records.append(
+            {
+                "date": date_value,
+                "type": txn_type,
+                "category": category,
+                "amount": amount,
+                "description": description,
+                "tags": tags,
+                "is_need": is_need,
+                "is_fixed": is_fixed,
+                "local_comment": "已按明确的重复周期展开，未调用外部 AI。",
+            }
+        )
+    return records
+
+
+def _has_recurrence_scope(text):
+    value = re.sub(r"\s+", "", str(text or ""))
+    return bool(
+        RECURRENCE_SCOPE_RE.search(value)
+        or CHINESE_DATE_RANGE_RE.search(value)
+        or ISO_DATE_RANGE_RE.search(value)
+    )
+
+
+def _has_transaction_amount(text):
+    value = re.sub(r"\s+", "", str(text or ""))
+    value = ISO_DATE_RANGE_RE.sub("", value)
+    value = CHINESE_DATE_RANGE_RE.sub("", value)
+    value = DATE_RE.sub("", value)
+    value = RECURRENCE_SCOPE_RE.sub("", value)
+    return bool(AMOUNT_RE.search(value))
+
+
+def _is_non_transaction_clause(text):
+    value = re.sub(r"\s+", "", str(text or "")).strip("，,。；;：:")
+    return not value or bool(NON_TRANSACTION_CLAUSE_RE.fullmatch(value))
+
+
+def _parse_one_off_recurrence_clause(clause, base_date, recurrence_dates):
+    """Parse a dated one-off item without borrowing the recurrence frequency."""
+    value = str(clause or "").strip()
+    weekday_match = WEEKDAY_REFERENCE_RE.search(value)
+    if weekday_match:
+        weekday_text = "日" if weekday_match.group(1) == "天" else weekday_match.group(1)
+        weekday = "一二三四五六日".index(weekday_text)
+        matches = [item for item in recurrence_dates if item.weekday() == weekday]
+        if len(matches) != 1:
+            return []
+        entry_date = matches[0].isoformat()
+        value = WEEKDAY_REFERENCE_RE.sub("", value, count=1)
+        records = parse_amount_entries(value, entry_date)
+    else:
+        records = []
+        for entry_date, part in split_date_chunks(value, base_date):
+            records.extend(parse_amount_entries(part, entry_date))
+
+    amount_text = DATE_RE.sub("", value)
+    return records if len(records) == len(AMOUNT_RE.findall(amount_text)) else []
+
+
+def _clean_recurring_description(text, category):
+    value = RECURRENCE_NARRATION_RE.sub("", str(text or ""))
+    value = RECURRENCE_ACTION_RE.sub("", value)
+    value = re.sub(r"(?:元|块|rmb|RMB)", "", value)
+    value = re.sub(r"[的了，,。.；;：:\s]+", "", value)
+    value = re.sub(r"^(?:这|那|上述)?[零〇一二两三四五六七八九十百\d]+天", "", value)
+    value = re.sub(r"^都", "", value)
+    return value[:200] or category
+
+
+def _parse_cn_integer(value):
+    text = str(value or "")
+    if text.isdigit():
+        return int(text)
+    digits = {"零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
+              "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+    if text == "十":
+        return 10
+    if "百" in text:
+        left, _, right = text.partition("百")
+        return digits.get(left, 1) * 100 + _parse_cn_integer(right or "零")
+    if "十" in text:
+        left, _, right = text.partition("十")
+        return digits.get(left, 1) * 10 + digits.get(right, 0)
+    return digits.get(text, 0)
 
 
 def split_date_chunks(text, base_date):
@@ -1289,9 +1642,10 @@ def clean_description(text):
     if boundary_parts:
         value = boundary_parts[-1].strip(" ，,。.；;：:")
 
-    payment_parts = [part for part in PAYMENT_SPLIT_RE.split(value) if part.strip()]
-    if payment_parts:
-        value = payment_parts[-1].strip(" ，,。.；;：:")
+    if not text_mentions_personal_advance(value):
+        payment_parts = [part for part in PAYMENT_SPLIT_RE.split(value) if part.strip()]
+        if payment_parts:
+            value = payment_parts[-1].strip(" ，,。.；;：:")
 
     value = trim_utility_description(value)
     previous = None

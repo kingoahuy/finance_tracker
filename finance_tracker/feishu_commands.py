@@ -985,6 +985,7 @@ def _format_finance_analysis(
     advice = str(insights.get("saving_advice") or "").strip()
     if advice:
         lines.extend(["", f"建议：{advice}"])
+    lines.extend(_format_personal_advance(overview.get("personal_advance"), "本月"))
     return "\n".join(lines)
 
 
@@ -999,6 +1000,7 @@ def _format_today(summary):
     ]
     if summary.get("is_over_daily_budget"):
         lines.append("今日支出高于当前日均预算参考，可以稍微留意。")
+    lines.extend(_format_personal_advance(summary.get("personal_advance"), "今日"))
     return "\n".join(lines)
 
 
@@ -1023,7 +1025,27 @@ def _format_month(summary):
     )
     if summary.get("budget_usage", 0) >= 80:
         lines.append("本月预算使用率较高，后续支出可以更谨慎一些。")
+    lines.extend(_format_personal_advance(summary.get("personal_advance"), "本月"))
     return "\n".join(lines)
+
+
+def _format_personal_advance(advance, period_label):
+    advance = advance or {}
+    expense = float(advance.get("advance_expense") or 0)
+    reimbursement = float(advance.get("advance_reimbursement") or 0)
+    period_balance = float(advance.get("advance_balance") or 0)
+    current_balance = float(advance.get("current_balance", period_balance) or 0)
+    count = int(advance.get("transaction_count") or 0)
+    if not count and not expense and not reimbursement and not current_balance:
+        return []
+    return [
+        "",
+        "个人垫付（单独列示，不计入上方收支）：",
+        f"{period_label}垫付支出：¥{expense:.2f}",
+        f"{period_label}垫付回款：¥{reimbursement:.2f}",
+        f"{period_label}垫付净额：¥{period_balance:.2f}",
+        f"当前垫付余额：¥{current_balance:.2f}",
+    ]
 
 
 def _format_recent(records, limit):
